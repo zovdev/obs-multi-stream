@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>OBS Multi-Stream</title>
+<link rel="stylesheet" href="dock.css">
+</head>
+<body>
+
+<div class="dock">
+  <div class="dock-scroll">
+    <header class="topbar">
+    <div class="viewers">
+      <div class="viewer-pill twitch">
+        <span class="dot"></span>
+        <span class="platform">Twitch</span>
+        <span class="count" id="tw-count">—</span>
+      </div>
+      <div class="viewer-pill youtube">
+        <span class="dot"></span>
+        <span class="platform">YouTube</span>
+        <span class="count" id="yt-count">—</span>
+      </div>
+    </div>
+    <div class="live-controls" id="live-controls" hidden>
+      <div class="live-badge" id="live-badge">
+        <span class="live-dot"></span> В ЭФИРЕ <span id="timer" class="timer"></span>
+      </div>
+      <button id="btn-stop" class="btn-stop-mini"
+              title="Закончить стрим" aria-label="Закончить стрим">■</button>
+    </div>
+  </header>
+
+    <section class="panel" id="panel-auth">
+    <div class="auth-cards">
+
+      <div class="auth-card" id="card-twitch">
+        <div class="card-head">
+          <span class="card-title"><span class="p-dot tw"></span> Twitch</span>
+          <span class="verdict" id="tw-verdict">—</span>
+        </div>
+
+        <div class="card-user" id="tw-user" hidden></div>
+
+        <ul class="checks">
+          <li id="tw-check-token" class="check-unknown">Токен</li>
+          <li id="tw-check-scopes" class="check-unknown">Права: управление трансляцией</li>
+          <li id="tw-check-api" class="check-unknown">Проверка API канала</li>
+        </ul>
+
+        <div class="usercode" id="tw-usercode" hidden>
+          <div class="uc-label">Введите код на twitch.tv/activate:</div>
+          <div class="uc-row">
+            <b id="tw-usercode-val"></b>
+            <button id="btn-tw-copy" class="btn-copy" title="Скопировать код">⧉</button>
+          </div>
+          <button id="btn-tw-open" class="btn-auth tw secondary"
+                  title="Откроется в системном браузере — код уже в ссылке">Открыть twitch.tv/activate</button>
+          <div class="usercode-hint">Откроется системный браузер. После подтверждения панель продолжится автоматически</div>
+        </div>
+
+        <div class="err" id="tw-error" hidden></div>
+
+        <button id="btn-tw-auth" class="btn-auth tw">Подключить Twitch</button>
+      </div>
+
+      <div class="auth-card" id="card-youtube">
+        <div class="card-head">
+          <span class="card-title"><span class="p-dot yt"></span> YouTube</span>
+          <span class="verdict" id="yt-verdict">—</span>
+        </div>
+
+        <div class="card-user" id="yt-user" hidden></div>
+
+        <div class="obs-note" id="yt-obs-note" hidden></div>
+
+        <ul class="checks">
+          <li id="yt-check-token" class="check-unknown">Токен</li>
+          <li id="yt-check-scopes" class="check-unknown">Права: управление трансляцией</li>
+          <li id="yt-check-api" class="check-unknown">Проверка API канала</li>
+        </ul>
+
+                <div class="auth-actions" id="yt-auth-actions" hidden>
+          <div class="uc-label">Вход в Google:</div>
+          <button id="btn-yt-open-dock" class="btn-auth yt">Войти здесь — в панели OBS</button>
+          <button id="btn-yt-open-ext" class="btn-auth yt secondary"
+                  title="Откроется в системном браузере по умолчанию">Во внешнем браузере</button>
+          <div class="usercode-hint">После подтверждения панель вернётся сама.
+            Вторая кнопка открывает системный браузер — тот же поток,
+            Google пускает там всегда.</div>
+        </div>
+
+        <div class="usercode" id="yt-usercode" hidden>
+          Открыт браузер — подтвердите вход в Google
+        </div>
+
+        <div class="err" id="yt-error" hidden></div>
+
+        <button id="btn-yt-auth" class="btn-auth yt">Подключить YouTube</button>
+
+        <div class="hint" id="yt-hint-obs" hidden>
+          Не хотите входить здесь? Подключите YouTube в самом OBS:
+          <b>Настройки → Трансляция → Подключить аккаунт</b>,
+          затем нажмите «Перепроверить».
+        </div>
+
+        <details class="advanced" id="yt-advanced">
+          <summary>Расширенные: свой Google-клиент (не обязательно)</summary>
+          <div class="gclient-form">
+            <input type="text" id="yt-client-id"
+                   placeholder="Client ID (…apps.googleusercontent.com)" spellcheck="false">
+            <input type="password" id="yt-client-secret"
+                   placeholder="Client Secret (GOCSPX-…)" spellcheck="false">
+            <button id="btn-yt-save-client" class="btn-small">Сохранить клиент</button>
+          </div>
+          <details class="howto">
+            <summary>Как создать свой клиент (один раз, ~5 минут)</summary>
+            <ol>
+              <li><a href="https://console.cloud.google.com/" target="_blank">console.cloud.google.com</a> → создать проект</li>
+              <li>APIs &amp; Services → Library → включить <b>YouTube Data API v3</b></li>
+              <li>APIs &amp; Services → OAuth consent screen → External, добавить свой аккаунт в Test users</li>
+              <li>Credentials → Create Credentials → <b>OAuth client ID</b></li>
+              <li>Тип: <b>Desktop application</b> ← обязательно!</li>
+              <li>Скопировать Client ID и Client Secret сюда</li>
+            </ol>
+          </details>
+        </details>
+      </div>
+    </div>
+
+    <div class="step1-footer">
+      Когда обе платформы будут подключены — откроется экран настройки стрима
+      <button id="btn-recheck" class="link-btn" title="Повторить проверку токенов">⟳ Перепроверить</button>
+    </div>
+  </section>
+
+    <section class="panel" id="panel-settings" hidden>
+    <div class="panel-title">Настройки стрима
+      <span class="save-state" id="save-state"></span>
+    </div>
+
+    <div class="settings-form">
+            <div class="row preset-row" id="preset-row">
+        <label>Пресеты</label>
+        <div class="preset-controls">
+          <select id="preset-select" title="Выберите пресет — его настройки сразу применятся к полям ниже">
+            <option value="">— пресетов нет —</option>
+          </select>
+          <button id="btn-preset-save" class="btn-preset accent" title="Сохранить текущие настройки как новый пресет">＋</button>
+          <button id="btn-preset-rename" class="btn-preset" title="Переименовать выбранный пресет" hidden>✎</button>
+          <button id="btn-preset-delete" class="btn-preset" title="Удалить выбранный пресет" hidden>✕</button>
+        </div>
+        <div class="preset-popover" id="preset-popover" hidden>
+          <input type="text" id="preset-name" placeholder="Название пресета…" maxlength="60" spellcheck="false">
+          <button id="btn-preset-name-ok" class="btn-preset" title="Сохранить (Enter)">✓</button>
+          <button id="btn-preset-name-cancel" class="btn-preset" title="Отмена (Esc)">✕</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Название стрима</label>
+        <input type="text" id="set-title" placeholder="Название стрима">
+      </div>
+
+      <div class="row">
+        <label>Описание</label>
+        <textarea id="set-description" rows="2" placeholder="Описание"></textarea>
+      </div>
+
+      <div class="row two-col">
+        <div class="game-box">
+          <label>Игра</label>
+          <div class="game-field" id="game-field">
+            <input type="text" id="set-game" placeholder="Например: Dota 2" autocomplete="off" spellcheck="false">
+            <div class="game-selected" id="game-selected" hidden>
+              <button type="button" class="game-chip" id="game-chip" title="Нажмите, чтобы изменить игру">✔
+                <span class="game-chip-name" id="game-chip-name"></span>
+              </button>
+              <button type="button" class="game-chip-badge" id="game-chip-badge" title="Уточнить категорию YouTube">YT: авто</button>
+              <button type="button" class="game-chip-clear" id="game-chip-clear" title="Убрать игру">✕</button>
+            </div>
+            <div class="game-candidates" id="game-candidates" hidden></div>
+          </div>
+        </div>
+        <div class="tags-cell">
+          <label>Теги <span class="label-hint">запятая или Enter — тег станет блоком</span></label>
+          <div class="tags-box" id="tags-box">
+            <div class="tags-chips" id="tags-chips"></div>
+            <input type="text" id="set-tags" placeholder="добавьте тег…" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+      </div>
+
+      <div class="row thumb-row" id="thumb-row">
+        <label>Превью YouTube
+          <span class="label-hint">JPG/PNG до 2 МБ — клик по картинке заменяет, перетащите файл сюда же</span>
+        </label>
+        <div class="thumb-field">
+          <button type="button" class="thumb-preview" id="thumb-preview" title="Нажмите, чтобы выбрать или заменить превью">
+            <span class="thumb-empty" id="thumb-empty">＋</span>
+            <img id="thumb-img" alt="Превью стрима" hidden>
+            <span class="thumb-replace" id="thumb-replace">Заменить</span>
+            <span class="thumb-clear" id="thumb-clear" title="Убрать превью" hidden>✕</span>
+          </button>
+          <input type="file" id="thumb-file" accept="image/jpeg,image/png" hidden>
+        </div>
+      </div>
+
+      <div class="row twyt" id="twyt-block">
+        <div class="twyt-head">
+          <span class="b-label tw">Twitch</span>
+          <span class="b-label yt">YouTube</span>
+        </div>
+        <div class="twyt-label">Битрейт, Kbps</div>
+        <div class="twyt-cells">
+          <div class="stepper" data-min="1000" data-max="12000" data-step="500">
+            <button type="button" class="st-btn" data-dir="-1" tabindex="-1">−</button>
+            <input type="number" id="set-twitch-bitrate" min="1000" max="12000" step="500">
+            <button type="button" class="st-btn" data-dir="1" tabindex="-1">＋</button>
+          </div>
+          <div class="stepper" data-min="1000" data-max="50000" data-step="500">
+            <button type="button" class="st-btn" data-dir="-1" tabindex="-1">−</button>
+            <input type="number" id="set-youtube-bitrate" min="1000" max="50000" step="500">
+            <button type="button" class="st-btn" data-dir="1" tabindex="-1">＋</button>
+          </div>
+        </div>
+        <div class="twyt-warn" id="tw-bitrate-warn" hidden>Twitch рекомендует до 6000 Kbps — выше возможно отключение транскодов и нестабильный эфир</div>
+        <div class="twyt-label">Дорожка звука</div>
+        <div class="twyt-cells">
+          <div class="track-seg" id="seg-twitch-track"></div>
+          <div class="track-seg" id="seg-youtube-track"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="btn-start" class="btn-start" disabled>
+      ▶ Запустить стрим (Twitch + YouTube)
+    </button>
+    <div class="start-hint" id="start-hint">Запуск доступен после подключения Twitch и YouTube</div>
+  </section>
+
+    <section class="panel" id="panel-live" hidden>
+    <div class="live-stats">
+      <span class="stat-item"><span class="p-dot tw"></span><b>Twitch</b>
+        <span class="stat-text" id="stat-twitch">подключение…</span></span>
+      <span class="stat-sep">·</span>
+      <span class="stat-item"><span class="p-dot yt"></span><b>YouTube</b>
+        <span class="stat-text" id="stat-youtube">подключение…</span></span>
+      <span class="stat-sep">·</span>
+      <span class="stat-item"><span class="p-dot omr"></span>
+        <span class="stat-text" id="stat-omr">проверка…</span></span>
+    </div>
+  </section>
+
+    <main class="chat" id="chat" hidden>
+    <div class="chat-placeholder" id="chat-placeholder">
+      Ожидание сообщений из чатов Twitch и YouTube…
+    </div>
+  </main>
+  </div>
+
+    <footer class="log-line" id="log-line">Подключение к плагину…</footer>
+</div>
+
+<script src="dock.js"></script>
+</body>
+</html>

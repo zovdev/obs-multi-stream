@@ -153,16 +153,16 @@ def get_stream_key(access_token, broadcaster_id):
     return data[0]["stream_key"]
 
 def get_stream_viewers(access_token, user_login):
+    """viewer_count или None, если стрим офлайн.
 
-    try:
-        result = _make_request(
-            "GET", config.TWITCH_STREAMS_URL, access_token,
-            params={"user_login": user_login},
-        )
-        streams = result.get("data", [])
-        if not streams:
-            return None
-        return streams[0].get("viewer_count")
-    except TwitchAPIError as e:
-        config.log.warning(f"get_stream_viewers failed: {e}")
+    Ошибки API/сети НЕ глотаются (летят как TwitchAPIError наверх):
+    вызывающая сторона отличает «нет данных» (офлайн) от сбоя запроса.
+    """
+    result = _make_request(
+        "GET", config.TWITCH_STREAMS_URL, access_token,
+        params={"user_login": user_login},
+    )
+    streams = result.get("data", [])
+    if not streams:
         return None
+    return streams[0].get("viewer_count")

@@ -1156,3 +1156,206 @@ html, body {
 .log-line.warning { color: #ffb74d; }
 .log-line.error { color: #ef5350; }
 .log-line.success { color: #66bb6a; }
+
+/* ============ Настройки расширения (вкладка ⚙) ============ */
+
+.btn-gear {
+  flex: none;
+  margin-left: 10px;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #3d3d46;
+  border-radius: 7px;
+  background: #26262c;
+  color: #b9b9c2;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.btn-gear:hover { border-color: #9146FF; color: #fff; }
+.btn-gear.active {
+  border-color: #9146FF;
+  color: #fff;
+  background: #3a2a63;
+}
+
+.ext-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: #17171b;
+  overflow-y: auto;
+  padding: 16px 16px 24px;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a44 #17171b;
+}
+
+.ext-panel[hidden] { display: none !important; }
+
+.ext-panel .panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.ext-panel .settings-form .row { margin-bottom: 16px; }
+
+.help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin-left: 6px;
+  border: 1px solid #4a4a55;
+  border-radius: 50%;
+  background: transparent;
+  color: #9a9aa3;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  vertical-align: middle;
+  padding: 0;
+}
+
+.help-btn:hover { border-color: #9146FF; color: #fff; }
+
+.help-popover {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: #1f1f24;
+  border: 1px solid #33333c;
+  border-left: 3px solid #9146FF;
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #b9b9c2;
+}
+
+.help-popover.wide { max-height: 260px; overflow-y: auto; }
+.help-popover[hidden] { display: none; }
+
+.help-popover .tag-doc { margin: 2px 0; }
+.help-popover code {
+  background: #17171b;
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #d3b4ff;
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+
+.interval-box { min-width: 0; }
+.interval-box input { width: 100%; }
+
+.token-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 560px) { .token-grid { grid-template-columns: 1fr; } }
+
+.token-card {
+  background: #1f1f24;
+  border: 1px solid #2e2e35;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.token-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 8px;
+}
+
+.token-btns { display: flex; gap: 8px; margin-bottom: 7px; }
+.token-btns .btn-small { flex: 1; }
+
+.token-status {
+  font-size: 12px;
+  color: #8a8a93;
+  line-height: 1.45;
+  min-height: 17px;
+  word-break: break-word;
+}
+
+.token-status.ok { color: #7bd88a; }
+.token-status.fail { color: #ff7b7b; }
+.token-status.busy { color: #d3b4ff; }
+
+.format-preview {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #101014;
+  border: 1px dashed #33333c;
+  border-radius: 7px;
+  min-height: 40px;
+}
+
+.format-preview .chat-message {
+  background: transparent;
+  border-left: none;
+  padding: 2px 0;
+  margin-bottom: 2px;
+}
+
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  color: #c9c9d2;
+  cursor: pointer;
+  margin-bottom: 10px;
+  line-height: 1.45;
+}
+
+.check-row input { margin-top: 2px; accent-color: #9146FF; }
+
+.overlay-url-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.overlay-url-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: "Consolas", "JetBrains Mono", monospace;
+  font-size: 12.5px;
+  color: #d3b4ff;
+}
+
+.overlay-url-row input:disabled { opacity: 0.45; }
+
+/* Аватарки в чате (общие для док-чата и оверлея-превью) */
+.chat-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
+  margin-right: 6px;
+  flex: none;
+}
+
+.chat-avatar.letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  text-transform: none;
+  user-select: none;
+}
+
+/* Контейнер вкладки не нужен: .ext-panel — position:fixed (модальное окно) */

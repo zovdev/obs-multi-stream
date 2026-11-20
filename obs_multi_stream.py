@@ -62,6 +62,19 @@ _state = {
     "twitch_audio_track": config.DEFAULT_AUDIO_TRACK,
     "youtube_audio_track": config.DEFAULT_AUDIO_TRACK,
 
+    # --- Настройки расширения (вкладка «Настройки расширения») ---
+    # Источник чата YouTube: auto | innertube | official
+    "ext_chat_source": "auto",
+    # Интервалы опроса зрителей, c (5..120)
+    "ext_yt_viewers_interval": 15,
+    "ext_tw_viewers_interval": 30,
+    # Формат сообщений чата (теги <time> <source> <avatar> <username> <message>)
+    "ext_chat_format": "<time> <source> <avatar> <username>: <message>",
+    # «Чат для показа» — отдельная прозрачная страница для Browser Source
+    "ext_overlay_enabled": False,
+    "ext_overlay_ttl": 30,            # сколько секунд висит сообщение
+    "ext_overlay_max_messages": 15,   # максимум сообщений на экране
+
     "dock_http_port": config.DEFAULT_DOCK_HTTP_PORT,
     "dock_ws_port": config.DEFAULT_DOCK_WS_PORT,
 
@@ -245,7 +258,7 @@ def _frontend_event_callback(event):
 
 def script_description():
     return (
-        "<h2>OBS Multi-Stream v3.21.1 (YouTube + Twitch)</h2>"
+        "<h2>OBS Multi-Stream v3.24.0 (YouTube + Twitch)</h2>"
         "<p>Одновременный стрим на Twitch и YouTube с едиными настройками. "
         "Всё управление — в док-панели: "
         "View → Docks → Custom Browser Docks → "
@@ -256,11 +269,12 @@ def script_description():
         "НЕ нужен).<br>"
         "<b>Шаг 2:</b> настройки стрима (автосохранение).<br>"
         "<b>Шаг 3:</b> запуск обеих трансляций одной кнопкой.</p>"
-        "<p>Стриминг выполняет плагин <b>obs-multi-rtmp</b> (0.6+, "
-        "https://github.com/sorayuki/obs-multi-rtmp): этот скрипт создаёт "
-        "в нём две цели с ключами и битрейтами и запускает их "
-        "синхронно с основным выходом OBS (в локальный sink). "
-        "Пакеты: websockets, websocket-client. См. README.md.</p>"
+        "<p><b>Экономия CPU:</b> кодеры обеих платформ берутся из "
+        "настроенного кодера стрима OBS (Settings → Output). Twitch идёт "
+        "основным выходом OBS, YouTube — целью плагина obs-multi-rtmp "
+        "(0.6+, https://github.com/sorayuki/obs-multi-rtmp); «холостого» "
+        "кодирования больше нет. Пакеты: websockets, websocket-client. "
+        "См. README.md.</p>"
     )
 
 def script_defaults(settings):
@@ -295,7 +309,7 @@ def script_update(settings):
     config.log.info("Settings updated")
 
 def script_load(settings):
-    config.log.info("OBS Multi-Stream v3.21.1 loading...")
+    config.log.info("OBS Multi-Stream v3.24.0 loading...")
 
     global _main_thread_id
     _main_thread_id = threading.get_ident()
@@ -358,6 +372,7 @@ def script_load(settings):
 
     _state["viewer_counter"] = viewer_counter.ViewerCounter(on_update=_on_viewers_update)
     _state["viewer_counter"].start()
+    _state["chat_dispatcher_stop"] = threading.Event()
     threading.Thread(target=_chat_dispatcher, daemon=True).start()
 
     threading.Thread(target=_startup_verification_worker, daemon=True).start()
@@ -382,7 +397,7 @@ def script_load(settings):
     _broadcast_presets()
     _broadcast_engine_status()
 
-    config.log.info("OBS Multi-Stream v3.21.1 loaded")
+    config.log.info("OBS Multi-Stream v3.24.0 loaded")
 
 def script_unload():
     config.log.info("OBS Multi-Stream v3 unloading...")
@@ -415,10 +430,6 @@ def script_unload():
                     config.log.error(f"engine shutdown: {e}")
             else:
                 try:
-                    engine.sink.stop()
-                except Exception:
-                    pass
-                try:
                     if engine.backup.exists():
                         engine.recover_if_needed()
                 except Exception as e:
@@ -441,6 +452,8 @@ def script_unload():
             _state["viewer_counter"].stop()
         except Exception:
             pass
+    if _state.get("chat_dispatcher_stop"):
+        _state["chat_dispatcher_stop"].set()
     if _state["dock_server"]:
         try:
             _state["dock_server"].stop()
@@ -1148,6 +1161,21 @@ def _on_dock_command(cmd):
     elif cmd_type == "get_settings":
         _broadcast_settings()
 
+    elif cmd_type == "get_overlay_config":
+        _broadcast_overlay_config()
+
+    elif cmd_type == "refresh_token":
+        threading.Thread(
+            target=_refresh_token_worker,
+            args=(cmd.get("platform", ""),),
+            daemon=True).start()
+
+    elif cmd_type == "test_token":
+        threading.Thread(
+            target=_test_token_worker,
+            args=(cmd.get("platform", ""),),
+            daemon=True).start()
+
     elif cmd_type == "get_auth_status":
         _broadcast_auth_status()
 
@@ -1704,6 +1732,10 @@ def _start_stream_worker():
 
         _reset_stream_bitrate_counters()
         _state["last_viewers"] = {"twitch": None, "youtube": None}
+        if _state.get("viewer_counter"):
+            _state["viewer_counter"].reset_cache()
+
+        _validate_stream_settings()
 
         _send_log("info", "Twitch: получаем stream key через API...")
         twitch_stream_key = _tw_call(twitch_api.get_stream_key, tw["user_id"])
@@ -1805,12 +1837,18 @@ def _start_stream_worker():
             },
         }
 
-        _send_log("info", "obs-multi-rtmp: запись целей Twitch + YouTube...")
+        _send_log("info",
+                  "Подготовка эфира: основной выход → Twitch, "
+                  "цель YouTube → obs-multi-rtmp...")
         try:
-            engine.prepare(platforms)
-            _send_log("info", "obs-multi-rtmp: запуск обоих потоков...")
+            prepared = engine.prepare(platforms)
+            for warn in prepared.get("warnings", []):
+                _send_log("warning", warn)
+            _send_log("info",
+                      "Запуск: Twitch основным выходом OBS, YouTube — "
+                      "по sync-start...")
             engine.go_live(
-                wait_publish_timeout=config.OMR_PUBLISH_TIMEOUT,
+                wait_bytes_timeout=config.OMR_PUBLISH_TIMEOUT,
                 wait_start_timeout=config.OMR_START_TIMEOUT)
         except Exception as e:
             config.log.error(f"omr engine failed: {e}", exc_info=True)
@@ -1823,8 +1861,9 @@ def _start_stream_worker():
         engine_went_live = True
 
         _send_log("success",
-                  "obs-multi-rtmp: цели Twitch и YouTube запущены "
-                  "(кодеры — его собственные)")
+                  "Потоки запущены: Twitch — основным выходом OBS, "
+                  "YouTube — целью obs-multi-rtmp (кодеры — из настроек "
+                  "вывода OBS)")
 
         transitioned = acquired["was_live"]
         if transitioned:
@@ -1867,14 +1906,22 @@ def _start_stream_worker():
             )
             _state["twitch_chat_reader"].start()
 
-        if _state["youtube_live_chat_id"]:
+        if _state["youtube_live_chat_id"] or _state.get("youtube_video_id"):
+            # video_id включает анонимный путь чтения чата (innertube,
+            # без квоты): он работает даже если activeLiveChatId не
+            # удалось получить — сессия поднимается в потоке ридера.
             _state["youtube_chat_reader"] = youtube_chat.YouTubeChatReader(
                 access_token=yt["token"],
                 live_chat_id=_state["youtube_live_chat_id"],
                 message_queue=_state["chat_queue"],
+                video_id=_state.get("youtube_video_id"),
                 on_quota_warning=lambda r: (
                     _state["dock_server"].send_quota_warning(r)
                     if _state.get("dock_server") else None),
+                on_quota_exhausted=lambda s: (
+                    _state["dock_server"].send_quota_exhausted(s)
+                    if _state.get("dock_server") else None),
+                on_source_change=_on_yt_chat_source_change,
             )
             _state["youtube_chat_reader"].start()
 
@@ -1975,6 +2022,8 @@ def _stop_stream_worker():
         _state["youtube_live_chat_id"] = None
         _state["youtube_broadcast_reused"] = False
         _state["last_viewers"] = {"twitch": None, "youtube": None}
+        if _state.get("viewer_counter"):
+            _state["viewer_counter"].reset_cache()
         _reset_stream_bitrate_counters()
 
         _send_log("success", "Стрим остановлен")
@@ -1988,7 +2037,8 @@ def _stop_stream_worker():
         _state["stream_stopping"] = False
 
 def _chat_dispatcher():
-    while True:
+    stop_event = _state.get("chat_dispatcher_stop")
+    while not (stop_event and stop_event.is_set()):
         try:
             msg = _state["chat_queue"].get(timeout=1)
         except queue.Empty:
@@ -1999,6 +2049,7 @@ def _chat_dispatcher():
                 author=msg["author"],
                 text=msg["text"],
                 color=msg.get("color"),
+                avatar=msg.get("avatar"),
                 is_owner=msg.get("is_owner", False),
                 is_moderator=msg.get("is_moderator", False),
                 timestamp=msg.get("timestamp"),
@@ -2011,6 +2062,55 @@ def _on_viewers_update(twitch_viewers, youtube_viewers):
     }
     if _state.get("dock_server"):
         _state["dock_server"].send_viewers(twitch_viewers, youtube_viewers)
+
+def _on_yt_chat_source_change(source, reason):
+    """Смена источника чата YouTube (анонимный innertube <-> Data API)."""
+    if source == "innertube":
+        _send_log("success", "YouTube чат: анонимный источник "
+                             "(квота Data API не тратится)")
+    else:
+        _send_log("warning", f"YouTube чат: переключение на официальный "
+                             f"API — квота тратится ({reason})")
+    if _state.get("dock_server"):
+        _state["dock_server"].send_chat_source(source, reason)
+
+# Жёсткие лимиты платформ (сверх них API просто отклоняет запрос):
+#   YouTube: title ≤ 100, description ≤ 5000, теги в сумме ≤ 480 символов
+#   Twitch:  title ≤ 140, тег ≤ 25 символов, ≤ 10 тегов
+TITLE_MAX = 100
+DESCRIPTION_MAX = 5000
+TAG_LEN_MAX = 25
+TAGS_COUNT_MAX = 30
+
+def _validate_stream_settings():
+    """Проверка настроек перед запуском эфира: предупреждения в панель.
+
+    Обрезка до жёстких лимитов происходит ещё при сохранении
+    (_apply_settings_from_dock), здесь — только предупреждения о том,
+    что платформа молча обрежет/проигнорирует.
+    """
+    tags_list = [t for t in (_state["tags"] or "").split(", ") if t]
+
+    long_tags = [t for t in tags_list if len(t) > TAG_LEN_MAX]
+    if long_tags:
+        _send_log("warning",
+                  f"Теги длиннее {TAG_LEN_MAX} символов обрежет Twitch: "
+                  f"{', '.join(long_tags[:5])}")
+    if len(tags_list) > 10:
+        _send_log("warning",
+                  f"Тегов {len(tags_list)}: Twitch возьмёт только первые "
+                  "10, остальные уйдут только в YouTube")
+
+    if _state["twitch_bitrate"] < 2500:
+        _send_log("warning",
+                  f"Битрейт Twitch {_state['twitch_bitrate']} Kbps очень "
+                  "низкий для 1080p — картинка будет мутной")
+
+    thumb = _state.get("thumbnail_path")
+    if thumb and not os.path.isfile(thumb):
+        _send_log("warning",
+                  f"Файл превью не найден: {thumb} — превью не будет "
+                  "загружено")
 
 def _apply_settings_from_dock(settings):
 
@@ -2025,6 +2125,11 @@ def _apply_settings_from_dock(settings):
         if key in settings:
             _state[state_key] = str(settings[key])
             changed = True
+    # Жёсткие лимиты платформ: режем сразу, чтобы в API не ушло лишнее
+    if len(_state["title"]) > TITLE_MAX:
+        _state["title"] = _state["title"][:TITLE_MAX]
+    if len(_state["description"]) > DESCRIPTION_MAX:
+        _state["description"] = _state["description"][:DESCRIPTION_MAX]
     if "tags" in settings:
         normalized = _normalize_tags(str(settings["tags"]))
         if normalized != _state["tags"]:
@@ -2079,6 +2184,218 @@ def _apply_settings_from_dock(settings):
         if _state.get("dock_server"):
             _state["dock_server"].send_settings_saved()
 
+    _apply_ext_settings(settings)
+
+# ------------------------------------------------------ настройки расширения
+
+_EXT_CHAT_SOURCES = ("auto", "innertube", "official")
+EXT_CHAT_FORMAT_MAX = 300
+EXT_OVERLAY_TTL_MIN, EXT_OVERLAY_TTL_MAX = 5, 600
+EXT_OVERLAY_MSGS_MIN, EXT_OVERLAY_MSGS_MAX = 1, 50
+EXT_INTERVAL_MIN, EXT_INTERVAL_MAX = 5, 120
+
+def _clamp_int(value, default, lo, hi):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, value))
+
+def _apply_ext_settings(settings):
+    """Настройки расширения из дока: применить на лету + сохранить.
+
+    Отдельно от настроек стрима: не трогает пресеты, применяется сразу
+    (источник чата — с рестартом ридера, интервалы зрителей — в следующем
+    цикле счётчика, оверлей — рассылкой конфига всем клиентам).
+    """
+    if not isinstance(settings, dict):
+        return
+
+    need_reader_restart = False
+    need_overlay_push = False
+
+    if "ext_chat_source" in settings:
+        value = str(settings["ext_chat_source"] or "auto").strip().lower()
+        if value not in _EXT_CHAT_SOURCES:
+            value = "auto"
+        if value != _state["ext_chat_source"]:
+            _state["ext_chat_source"] = value
+            need_reader_restart = True
+
+    if "ext_yt_viewers_interval" in settings:
+        value = _clamp_int(settings["ext_yt_viewers_interval"], 15,
+                           EXT_INTERVAL_MIN, EXT_INTERVAL_MAX)
+        _state["ext_yt_viewers_interval"] = value
+    if "ext_tw_viewers_interval" in settings:
+        value = _clamp_int(settings["ext_tw_viewers_interval"], 30,
+                           EXT_INTERVAL_MIN, EXT_INTERVAL_MAX)
+        _state["ext_tw_viewers_interval"] = value
+
+    if "ext_chat_format" in settings:
+        value = str(settings["ext_chat_format"] or "").strip()
+        if not value:
+            value = _state["ext_chat_format"]
+        _state["ext_chat_format"] = value[:EXT_CHAT_FORMAT_MAX]
+        need_overlay_push = True
+
+    if "ext_overlay_enabled" in settings:
+        _state["ext_overlay_enabled"] = bool(settings["ext_overlay_enabled"])
+        need_overlay_push = True
+    if "ext_overlay_ttl" in settings:
+        _state["ext_overlay_ttl"] = _clamp_int(
+            settings["ext_overlay_ttl"], 30,
+            EXT_OVERLAY_TTL_MIN, EXT_OVERLAY_TTL_MAX)
+        need_overlay_push = True
+    if "ext_overlay_max_messages" in settings:
+        _state["ext_overlay_max_messages"] = _clamp_int(
+            settings["ext_overlay_max_messages"], 15,
+            EXT_OVERLAY_MSGS_MIN, EXT_OVERLAY_MSGS_MAX)
+        need_overlay_push = True
+
+    # Переносим в config — оттуда значения читают youtube_chat и
+    # viewer_counter (каждый цикл, без перезапуска потоков).
+    config.YOUTUBE_CHAT_SOURCE = _state["ext_chat_source"]
+    config.YOUTUBE_VIEWERS_INTERVAL_SEC = _state["ext_yt_viewers_interval"]
+    config.TWITCH_VIEWERS_INTERVAL_SEC = _state["ext_tw_viewers_interval"]
+
+    if need_reader_restart and _state.get("streaming") \
+            and _state.get("youtube_chat_reader"):
+        # update_settings исполняется в потоке WS-цикла: рестарт ридера
+        # (join до 5 c) выносим в отдельный поток, чтобы не подвесить док.
+        threading.Thread(
+            target=_restart_youtube_chat_reader,
+            args=("смена источника в настройках",),
+            daemon=True).start()
+
+    if need_overlay_push:
+        _broadcast_overlay_config()
+
+    _save_stream_settings()
+
+def _restart_youtube_chat_reader(reason):
+    """Пересоздать ридер чата YouTube (применить новый источник)."""
+    old = _state.get("youtube_chat_reader")
+    if not old:
+        return
+    try:
+        old.stop()
+    except Exception as e:
+        config.log.warning(f"Chat reader stop: {e}")
+    _state["youtube_chat_reader"] = None
+
+    yt = _state["youtube"]
+    if not (_state.get("youtube_live_chat_id")
+            or _state.get("youtube_video_id")):
+        return
+    try:
+        reader = youtube_chat.YouTubeChatReader(
+            access_token=yt["token"],
+            live_chat_id=_state.get("youtube_live_chat_id"),
+            message_queue=_state["chat_queue"],
+            video_id=_state.get("youtube_video_id"),
+            on_quota_warning=lambda r: (
+                _state["dock_server"].send_quota_warning(r)
+                if _state.get("dock_server") else None),
+            on_quota_exhausted=lambda s: (
+                _state["dock_server"].send_quota_exhausted(s)
+                if _state.get("dock_server") else None),
+            on_source_change=_on_yt_chat_source_change,
+        )
+        _state["youtube_chat_reader"] = reader
+        reader.start()
+        _send_log("success",
+                  f"YouTube чат: источник «{config.YOUTUBE_CHAT_SOURCE}» "
+                  f"применён ({reason})")
+    except Exception as e:
+        config.log.error(f"Chat reader restart failed: {e}", exc_info=True)
+        _send_log("error", f"Не удалось перезапустить чат YouTube: {e}")
+
+# ------------------------------------------------------ токены: тест/рефреш
+
+def _send_token_status(platform, action, ok, message, expires_at=None):
+    if _state.get("dock_server"):
+        _state["dock_server"].send_token_status(
+            platform, action, ok, message, expires_at)
+    _send_log("success" if ok else "error", message)
+
+def _fmt_expires(expires_at):
+    if not expires_at:
+        return ""
+    left = int(expires_at - time.time())
+    if left <= 0:
+        return "истекает сейчас"
+    if left < 3600:
+        return f"истекает через ~{left // 60} мин"
+    return f"истекает через ~{left // 3600} ч {(left % 3600) // 60} мин"
+
+def _test_token_worker(platform):
+    """Проверка валидности токена БЕЗ обновления (кнопка «Проверить»)."""
+    platform = "twitch" if platform == "twitch" else "youtube"
+    st = _state[platform]
+    if not st.get("token"):
+        _send_token_status(platform, "test", False,
+                           f"{platform.capitalize()}: токена нет — "
+                           "сначала авторизация")
+        return
+    try:
+        if platform == "twitch":
+            v = oauth_flow.twitch_validate_token(st["token"])
+            login = v.get("login") or st.get("username") or "?"
+            expires_at = time.time() + int(v.get("expires_in") or 0)
+            _send_token_status(
+                platform, "test", True,
+                f"Twitch: токен валиден ({login})"
+                + (f", {_fmt_expires(expires_at)}" if v.get("expires_in")
+                   else ""),
+                expires_at if v.get("expires_in") else None)
+        else:
+            info = oauth_flow.google_tokeninfo(st["token"])
+            email = info.get("email") or st.get("email") or ""
+            exp = info.get("expires_in")
+            expires_at = time.time() + int(exp) if exp else None
+            _send_token_status(
+                platform, "test", True,
+                "YouTube: токен валиден" + (f" ({email})" if email else "")
+                + (f", {_fmt_expires(expires_at)}" if expires_at else ""),
+                expires_at)
+    except Exception as e:
+        _send_token_status(platform, "test", False,
+                           f"{platform.capitalize()}: токен невалиден — {e}")
+
+def _refresh_token_worker(platform):
+    """Принудительный refresh токена (кнопка «Обновить токен»)."""
+    platform = "twitch" if platform == "twitch" else "youtube"
+    try:
+        if platform == "twitch":
+            st = _state["twitch"]
+            if not st.get("refresh_token"):
+                raise oauth_flow.OAuthFlowError(
+                    "нет refresh_token — переподключите Twitch (Шаг 1)")
+            r = _refresh_twitch_access_token()
+            login = st.get("username") or "?"
+            expires_at = time.time() + int(r.get("expires_in") or 0)
+            _send_token_status(
+                platform, "refresh", True,
+                f"Twitch: токен обновлён ({login})"
+                + (f", {_fmt_expires(expires_at)}" if r.get("expires_in")
+                   else ""),
+                expires_at if r.get("expires_in") else None)
+        else:
+            r = _refresh_youtube_access_token()
+            st = _state["youtube"]
+            who = st.get("email") or "YouTube"
+            expires_at = st.get("token_expires_at")
+            _send_token_status(
+                platform, "refresh", True,
+                f"YouTube: токен обновлён ({who})"
+                + (f", {_fmt_expires(expires_at)}" if expires_at else ""),
+                expires_at)
+        _broadcast_auth_status()
+    except Exception as e:
+        _send_token_status(platform, "refresh", False,
+                           f"{platform.capitalize()}: обновление не удалось — "
+                           f"{e}")
+
 def _normalize_tags(text):
 
     tags = []
@@ -2093,7 +2410,7 @@ def _normalize_tags(text):
             continue
         seen.add(key)
         tags.append(tag)
-    return ", ".join(tags[:30])
+    return ", ".join(tags[:TAGS_COUNT_MAX])
 
 def _sync_selected_preset():
 
@@ -2127,6 +2444,14 @@ def _save_stream_settings():
         "twitch_audio_track": _state["twitch_audio_track"],
         "youtube_audio_track": _state["youtube_audio_track"],
         "last_preset_id": _state.get("last_preset_id"),
+        # Настройки расширения
+        "ext_chat_source": _state["ext_chat_source"],
+        "ext_yt_viewers_interval": _state["ext_yt_viewers_interval"],
+        "ext_tw_viewers_interval": _state["ext_tw_viewers_interval"],
+        "ext_chat_format": _state["ext_chat_format"],
+        "ext_overlay_enabled": _state["ext_overlay_enabled"],
+        "ext_overlay_ttl": _state["ext_overlay_ttl"],
+        "ext_overlay_max_messages": _state["ext_overlay_max_messages"],
     }
     try:
         path = _get_stream_settings_path()
@@ -2169,6 +2494,33 @@ def _load_stream_settings():
                     int(data.get(key, config.DEFAULT_AUDIO_TRACK))))
             except (TypeError, ValueError):
                 _state[key] = config.DEFAULT_AUDIO_TRACK
+
+        # Настройки расширения (старые settings.json без них — дефолты)
+        src = str(data.get("ext_chat_source") or "auto").strip().lower()
+        _state["ext_chat_source"] = (
+            src if src in _EXT_CHAT_SOURCES else "auto")
+        _state["ext_yt_viewers_interval"] = _clamp_int(
+            data.get("ext_yt_viewers_interval"), 15,
+            EXT_INTERVAL_MIN, EXT_INTERVAL_MAX)
+        _state["ext_tw_viewers_interval"] = _clamp_int(
+            data.get("ext_tw_viewers_interval"), 30,
+            EXT_INTERVAL_MIN, EXT_INTERVAL_MAX)
+        fmt = str(data.get("ext_chat_format") or "").strip()
+        if fmt:
+            _state["ext_chat_format"] = fmt[:EXT_CHAT_FORMAT_MAX]
+        _state["ext_overlay_enabled"] = bool(
+            data.get("ext_overlay_enabled", False))
+        _state["ext_overlay_ttl"] = _clamp_int(
+            data.get("ext_overlay_ttl"), 30,
+            EXT_OVERLAY_TTL_MIN, EXT_OVERLAY_TTL_MAX)
+        _state["ext_overlay_max_messages"] = _clamp_int(
+            data.get("ext_overlay_max_messages"), 15,
+            EXT_OVERLAY_MSGS_MIN, EXT_OVERLAY_MSGS_MAX)
+        # применяем к работающим модулям сразу при загрузке скрипта
+        config.YOUTUBE_CHAT_SOURCE = _state["ext_chat_source"]
+        config.YOUTUBE_VIEWERS_INTERVAL_SEC = _state["ext_yt_viewers_interval"]
+        config.TWITCH_VIEWERS_INTERVAL_SEC = _state["ext_tw_viewers_interval"]
+
         config.log.info(f"Stream settings loaded from {path}")
     except Exception as e:
         config.log.error(f"Failed to load stream settings: {e}")
@@ -2200,6 +2552,30 @@ def _broadcast_settings():
         "youtube_bitrate": _state["youtube_bitrate"],
         "twitch_audio_track": _state["twitch_audio_track"],
         "youtube_audio_track": _state["youtube_audio_track"],
+        # Настройки расширения
+        "ext_chat_source": _state["ext_chat_source"],
+        "ext_yt_viewers_interval": _state["ext_yt_viewers_interval"],
+        "ext_tw_viewers_interval": _state["ext_tw_viewers_interval"],
+        "ext_chat_format": _state["ext_chat_format"],
+        "ext_overlay_enabled": _state["ext_overlay_enabled"],
+        "ext_overlay_ttl": _state["ext_overlay_ttl"],
+        "ext_overlay_max_messages": _state["ext_overlay_max_messages"],
+        "overlay_url": _overlay_url(),
+    })
+
+def _overlay_url():
+    return (f"http://127.0.0.1:{_state['dock_http_port']}/overlay")
+
+def _broadcast_overlay_config():
+    """Конфиг оверлея всем клиентам (оверлей применяет его сразу)."""
+    if not _state.get("dock_server"):
+        return
+    _state["dock_server"].send_overlay_config({
+        "enabled": _state["ext_overlay_enabled"],
+        "format": _state["ext_chat_format"],
+        "ttl_sec": _state["ext_overlay_ttl"],
+        "max_messages": _state["ext_overlay_max_messages"],
+        "url": _overlay_url(),
     })
 
 def _broadcast_auth_status():

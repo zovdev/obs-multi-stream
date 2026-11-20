@@ -3,10 +3,12 @@ import io
 import json
 import time
 import os
+import threading
+import calendar
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 
@@ -15,6 +17,85 @@ class YouTubeAPIError(Exception):
     def __init__(self, message, http_code=None):
         super().__init__(message)
         self.http_code = http_code
+
+def _nth_sunday(year, month, n):
+    """Дата n-го воскресенья месяца (1-индекс)."""
+    first_wd, _ = calendar.monthrange(year, month)
+    return 1 + (6 - first_wd) % 7 + 7 * (n - 1)
+
+def _next_pacific_midnight(now_epoch=None):
+    """Epoch следующей полуночи по America/Los_Angeles.
+
+    Квота Google сбрасывается в полночь тихоокеанского времени
+    (PST = UTC-8 зимой, PDT = UTC-7 летом; переходы — 2-е воскресенье
+    марта / 1-е воскресенье ноября). Часы в сами дни перехода могут
+    отличаться на час — для оценки это несущественно.
+    """
+    now_epoch = now_epoch if now_epoch is not None else time.time()
+    now = datetime.utcfromtimestamp(now_epoch)
+    # Кандидаты: сегодня/+1/+2 по UTC. Тихоокеанская дата может быть
+    # меньше UTC-даты на сутки (00:00-07:00 UTC), поэтому «сегодня» тоже
+    # кандидат; берём первую полночь, которая ещё впереди.
+    for add_days in (0, 1, 2):
+        d = (now + timedelta(days=add_days)).date()
+        if (3, _nth_sunday(d.year, 3, 2)) <= (d.month, d.day) \
+                < (11, _nth_sunday(d.year, 11, 1)):
+            offset = -7  # PDT
+        else:
+            offset = -8  # PST
+        midnight_utc = calendar.timegm((d.year, d.month, d.day, 0, 0, 0,
+                                        0, 0, 0))
+        reset = midnight_utc - offset * 3600
+        if reset > now_epoch + 60:
+            return reset
+    return now_epoch + 86400
+
+class QuotaTracker:
+    """Локальная оценка расхода дневной квоты YouTube Data API.
+
+    Реальную квоту считает только сервер Google: API не отдаёт остаток,
+    о превышении узнаём из HTTP 403 quotaExceeded. Здесь — консервативная
+    оценка периодических вызовов этого плагина (чат +5 за liveChatMessages,
+    зрители +1 за videos.list каждые 30 c). Разовые вызовы запуска эфира
+    (broadcast/bind/transition/thumbnails, ~200-400 единиц) не учитываются.
+    Если квоту расходует что-то ещё с тем же Google-проектом (в т.ч. другие
+    копии плагина) — оценка занижена.
+    """
+
+    DAILY_LIMIT = 10000
+    CHAT_POLL_UNITS = 5
+    VIDEO_LIST_UNITS = 1
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._used = 0
+        self._reset_at = _next_pacific_midnight()
+
+    def _rollover_locked(self):
+        if time.time() >= self._reset_at:
+            self._used = 0
+            self._reset_at = _next_pacific_midnight()
+
+    def add(self, units):
+        with self._lock:
+            self._rollover_locked()
+            self._used += units
+            return self._used
+
+    def used(self):
+        with self._lock:
+            self._rollover_locked()
+            return self._used
+
+    def remaining(self):
+        return max(0, self.DAILY_LIMIT - self.used())
+
+    def seconds_until_reset(self):
+        with self._lock:
+            self._rollover_locked()
+            return max(0, int(self._reset_at - time.time()))
+
+quota_tracker = QuotaTracker()
 
 def _make_request(method, url, access_token, params=None, body=None,
                   is_multipart=False, multipart_data=None):
@@ -357,10 +438,18 @@ def get_video_viewers(access_token, video_id):
         "GET", config.YOUTUBE_VIDEOS_URL, access_token,
         params={"id": video_id, "part": "liveStreamingDetails"},
     )
+    # videos.list стоит 1 единицу квоты; успешный вызов учитываем в общем
+    # трекере (403/сетевые ошибки квоту не тратят).
+    quota_tracker.add(quota_tracker.VIDEO_LIST_UNITS)
     items = result.get("items", [])
     if not items:
         return None
     return items[0].get("liveStreamingDetails", {}).get("concurrentViewers")
+
+def is_quota_exceeded_error(exc):
+    """403 с признаком исчерпания дневной квоты в тексте ошибки."""
+    return (getattr(exc, "http_code", None) == 403
+            and "quota" in str(exc).lower())
 
 def list_live_chat_messages(access_token, live_chat_id, page_token=None):
 
@@ -382,6 +471,9 @@ def list_live_chat_messages(access_token, live_chat_id, page_token=None):
         items.append({
             "author": author_details.get("displayName", "Аноним"),
             "text": snippet.get("displayMessage", ""),
+            # profileImageUrl есть в authorDetails (может отсутствовать —
+            # тогда фронт покажет имитацию: цветной круг с буквой ника)
+            "avatar": author_details.get("profileImageUrl"),
             "is_owner": author_details.get("isChatOwner", False),
             "is_moderator": author_details.get("isChatModerator", False),
         })

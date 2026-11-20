@@ -30,6 +30,27 @@ YOUTUBE_CATEGORY_ID = "20"
 
 YOUTUBE_MADE_FOR_KIDS = False
 
+# Источник чтения чата YouTube (запись/модерация всегда через OAuth):
+#   "auto"      — анонимный innertube-клиент (как браузер без логина: без
+#                 квоты Data API, интервал задаёт сервер, обычно 1-10 c);
+#                 при поломке/блокировке — автоматический фолбэк на
+#                 официальный API с периодическими пробами вернуться;
+#   "innertube" — только анонимный путь (квота не тратится никогда);
+#   "official"  — только официальный Data API (как до v3.23; 5 единиц
+#                 квоты за каждый опрос).
+YOUTUBE_CHAT_SOURCE = "auto"
+
+# Интервал опроса зрителей YouTube в секундах (Data API videos.list,
+# 1 единица квоты за вызов; 15 c = 240 единиц/час). Twitch опрашивается
+# вдвое реже (30 c). При давлении квоты (>70%/>90% дневного лимита)
+# интервал YouTube автоматически растягивается до ~30/~60 c.
+YOUTUBE_VIEWERS_INTERVAL_SEC = 15
+
+# Интервал опроса зрителей Twitch в секундах (Helix без квоты-лимита
+# в понимании YouTube; слишком частый опрос всё же не нужен). Twitch
+# не зависит от квоты — растяжения по квоте для него нет.
+TWITCH_VIEWERS_INTERVAL_SEC = 30
+
 DEFAULT_TWITCH_RTMP_URL = "rtmp://live.twitch.tv/app/"
 DEFAULT_TWITCH_BITRATE = 6000
 TWITCH_BITRATE_MAX_KBPS = 6000
@@ -44,8 +65,6 @@ DEFAULT_AUDIO_BITRATE = 160
 DEFAULT_AUDIO_TRACK = 1
 AUDIO_TRACKS_MAX = 6
 RTMP_KEYINT_SEC = 2
-
-SINK_MAIN_BITRATE = 400
 
 OMR_SWITCH_TIMEOUT = 30
 OMR_START_TIMEOUT = 15

@@ -29,6 +29,8 @@
       <button id="btn-stop" class="btn-stop-mini"
               title="Закончить стрим" aria-label="Закончить стрим">■</button>
     </div>
+    <button id="btn-ext-settings" class="btn-gear" title="Настройки расширения: чат, зрители, токены"
+            aria-label="Настройки расширения">⚙</button>
   </header>
 
     <section class="panel" id="panel-auth">
@@ -158,20 +160,20 @@
       </div>
 
       <div class="row">
-        <label>Название стрима</label>
-        <input type="text" id="set-title" placeholder="Название стрима">
+        <label>Название стрима <span class="label-hint">до 100 символов — лимит YouTube</span></label>
+        <input type="text" id="set-title" placeholder="Название стрима" maxlength="100">
       </div>
 
       <div class="row">
-        <label>Описание</label>
-        <textarea id="set-description" rows="2" placeholder="Описание"></textarea>
+        <label>Описание <span class="label-hint">до 5000 символов — лимит YouTube</span></label>
+        <textarea id="set-description" rows="2" placeholder="Описание" maxlength="5000"></textarea>
       </div>
 
       <div class="row two-col">
         <div class="game-box">
           <label>Игра</label>
           <div class="game-field" id="game-field">
-            <input type="text" id="set-game" placeholder="Например: Dota 2" autocomplete="off" spellcheck="false">
+            <input type="text" id="set-game" placeholder="Например: Dota 2" autocomplete="off" spellcheck="false" maxlength="100">
             <div class="game-selected" id="game-selected" hidden>
               <button type="button" class="game-chip" id="game-chip" title="Нажмите, чтобы изменить игру">✔
                 <span class="game-chip-name" id="game-chip-name"></span>
@@ -186,7 +188,7 @@
           <label>Теги <span class="label-hint">запятая или Enter — тег станет блоком</span></label>
           <div class="tags-box" id="tags-box">
             <div class="tags-chips" id="tags-chips"></div>
-            <input type="text" id="set-tags" placeholder="добавьте тег…" autocomplete="off" spellcheck="false">
+            <input type="text" id="set-tags" placeholder="добавьте тег…" autocomplete="off" spellcheck="false" maxlength="25" title="Тег до 25 символов — лимит Twitch">
           </div>
         </div>
       </div>
@@ -239,6 +241,105 @@
     <div class="start-hint" id="start-hint">Запуск доступен после подключения Twitch и YouTube</div>
   </section>
 
+    <section class="panel ext-panel" id="panel-ext" hidden>
+    <div class="panel-title">
+      Настройки расширения
+      <button id="btn-ext-close" class="btn-preset" title="Закрыть (Esc)">✕</button>
+    </div>
+
+    <div class="settings-form">
+      <div class="row">
+        <label>Чтение чата YouTube
+          <button type="button" class="help-btn" data-help="help-chat-source" title="Что значат режимы">?</button>
+        </label>
+        <select id="ext-chat-source">
+          <option value="auto">Авто — анонимно, при сбое официальный API</option>
+          <option value="innertube">Только анонимный (квота не тратится)</option>
+          <option value="official">Только официальный Data API</option>
+        </select>
+        <div class="help-popover" id="help-chat-source" hidden>
+          <b>Авто</b> — чат читается как браузер без логина (анонимный внутренний канал YouTube): мгновенно и <b>без траты квоты Data API</b>. Если канал ломается или блокируется — автоматический переход на официальный API и периодические попытки вернуться.<br>
+          <b>Только анонимный</b> — квота не тратится никогда, но при поломке канала чат замолчит до восстановления.<br>
+          <b>Только официальный</b> — как в версиях до 3.23: liveChatMessages.list, <b>5 единиц квоты</b> за каждый опрос (10 000 в день).
+        </div>
+      </div>
+
+      <div class="row two-col">
+        <div class="interval-box">
+          <label>Обновление зрителей YouTube
+            <span class="label-hint">сек, 5–120 · 1 единица квоты за запрос</span></label>
+          <input type="number" id="ext-yt-interval" min="5" max="120" step="1">
+        </div>
+        <div class="interval-box">
+          <label>Обновление зрителей Twitch
+            <span class="label-hint">сек, 5–120 · бесплатно</span></label>
+          <input type="number" id="ext-tw-interval" min="5" max="120" step="1">
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Токены авторизации
+          <span class="label-hint">проверка — без обновления; обновить — принудительный refresh</span></label>
+        <div class="token-grid">
+          <div class="token-card">
+            <div class="token-head"><span class="p-dot tw"></span> Twitch</div>
+            <div class="token-btns">
+              <button id="btn-tw-test" class="btn-small">Проверить</button>
+              <button id="btn-tw-refresh" class="btn-small">Обновить</button>
+            </div>
+            <div class="token-status" id="tw-token-status">—</div>
+          </div>
+          <div class="token-card">
+            <div class="token-head"><span class="p-dot yt"></span> YouTube</div>
+            <div class="token-btns">
+              <button id="btn-yt-test" class="btn-small">Проверить</button>
+              <button id="btn-yt-refresh" class="btn-small">Обновить</button>
+            </div>
+            <div class="token-status" id="yt-token-status">—</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Формат сообщений чата
+          <button type="button" class="help-btn" data-help="help-chat-format" title="Доступные теги">?</button>
+        </label>
+        <input type="text" id="ext-chat-format" spellcheck="false" maxlength="300"
+               placeholder="<time> <source> <avatar> <username>: <message>">
+        <div class="help-popover wide" id="help-chat-format" hidden></div>
+        <div class="label-hint">Пример: <code>&lt;time&gt;&lt;avatar&gt;[&lt;username&gt;] - &lt;message&gt;</code> → 02:05ⓐ[@develper] - привет</div>
+        <div class="format-preview" id="format-preview"></div>
+      </div>
+
+      <div class="row">
+        <label>Чат для показа на сцене
+          <span class="label-hint">прозрачная страница для Browser Source OBS</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" id="ext-overlay-enabled">
+          Включить — отдельная локальная ссылка с копией чата (только сообщения, прозрачный фон)
+        </label>
+        <div class="overlay-url-row">
+          <input type="text" id="ext-overlay-url" readonly spellcheck="false"
+                 title="Скопируйте и вставьте как URL Browser Source в OBS">
+          <button id="btn-overlay-copy" class="btn-small" title="Скопировать ссылку">⧉</button>
+        </div>
+        <div class="row two-col">
+          <div class="interval-box">
+            <label>Время жизни сообщения
+              <span class="label-hint">сек, 5–600</span></label>
+            <input type="number" id="ext-overlay-ttl" min="5" max="600" step="1">
+          </div>
+          <div class="interval-box">
+            <label>Максимум сообщений
+              <span class="label-hint">1–50, старые исчезают</span></label>
+            <input type="number" id="ext-overlay-max" min="1" max="50" step="1">
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
     <section class="panel" id="panel-live" hidden>
     <div class="live-stats">
       <span class="stat-item"><span class="p-dot tw"></span><b>Twitch</b>
@@ -262,6 +363,7 @@
     <footer class="log-line" id="log-line">Подключение к плагину…</footer>
 </div>
 
+<script src="chat_format.js"></script>
 <script src="dock.js"></script>
 </body>
 </html>

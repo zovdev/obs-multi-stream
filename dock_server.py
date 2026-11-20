@@ -78,6 +78,11 @@ class DockHTTPHandler(http.server.BaseHTTPRequestHandler):
             "/dock.html": "dock.html",
             "/dock.css": "dock.css",
             "/dock.js": "dock.js",
+            "/overlay": "overlay.html",
+            "/overlay.html": "overlay.html",
+            "/overlay.css": "overlay.css",
+            "/overlay.js": "overlay.js",
+            "/chat_format.js": "chat_format.js",
         }
 
         filename = path_map.get(path)
@@ -110,7 +115,10 @@ class DockHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(500, f"Cannot read file: {e}")
             return
 
-        if filename == "dock.js" and _DOCK_SERVER_INSTANCE is not None:
+        # В скрипты, которым нужен порт WS, подставляем реальный порт
+        # (dock.js и overlay.js подключаются к одному и тому же WS-серверу).
+        if (filename in ("dock.js", "overlay.js")
+                and _DOCK_SERVER_INSTANCE is not None):
             try:
                 content = content.replace(
                     b"__WS_PORT__",
@@ -389,7 +397,7 @@ class DockServer:
 
     _QUICK_COMMANDS = frozenset((
         "update_settings", "get_settings", "get_auth_status", "get_state",
-        "get_oauth_session", "open_url",
+        "get_oauth_session", "open_url", "get_overlay_config",
         "preset_list", "preset_save", "preset_rename", "preset_delete",
         "preset_apply", "preset_select",
     ))
@@ -478,7 +486,7 @@ class DockServer:
             return len(self._clients)
 
     def send_chat_message(self, platform, author, text, color=None,
-                          is_owner=False, is_moderator=False,
+                          avatar=None, is_owner=False, is_moderator=False,
                           timestamp=None):
         self._message_queue.put({
             "type": "chat_message",
@@ -486,6 +494,7 @@ class DockServer:
             "author": author,
             "text": text,
             "color": color,
+            "avatar": avatar or None,
             "is_owner": is_owner,
             "is_moderator": is_moderator,
             "timestamp": timestamp or time.time(),
@@ -549,6 +558,41 @@ class DockServer:
             "type": "quota_warning",
             "platform": "youtube",
             "remaining": remaining,
+        })
+
+    def send_quota_exhausted(self, reset_in_sec):
+        self._message_queue.put({
+            "type": "quota_exhausted",
+            "platform": "youtube",
+            "reset_in": int(reset_in_sec or 0),
+        })
+
+    def send_chat_source(self, source, reason):
+        """Источник чата YouTube: innertube (анонимный) или official."""
+        self._message_queue.put({
+            "type": "chat_source",
+            "platform": "youtube",
+            "source": source,
+            "reason": reason or "",
+        })
+
+    def send_token_status(self, platform, action, ok, message,
+                          expires_at=None):
+        """Результат «Проверить»/«Обновить токен» из настроек расширения."""
+        self._message_queue.put({
+            "type": "token_status",
+            "platform": platform,
+            "action": action,          # "test" | "refresh"
+            "ok": bool(ok),
+            "message": message or "",
+            "expires_at": expires_at,
+        })
+
+    def send_overlay_config(self, cfg):
+        """Конфиг «чата для показа»: формат/TTL/лимит/включённость."""
+        self._message_queue.put({
+            "type": "overlay_config",
+            "overlay": cfg or {},
         })
 
     def send_log(self, level, message):

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+multistream.log
+secrets.dat
+settings.json
+presets.json
+live_session.json
+previews/
+backup/

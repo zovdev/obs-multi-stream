@@ -7,10 +7,7 @@ import glob
 import time
 import ctypes
 import random
-import socket
-import struct
 import shutil
-import threading
 
 try:
     import obspython as obs
@@ -306,427 +303,6 @@ def detect():
     _detect_cache["ts"] = now
     return dict(info)
 
-def _amf_string(s):
-    b = s.encode("utf-8")
-    return b"\x02" + struct.pack(">H", len(b)) + b
-
-def _amf_number(n):
-    return b"\x00" + struct.pack(">d", float(n))
-
-def _amf_bool(v):
-    return b"\x01" + (b"\x01" if v else b"\x00")
-
-def _amf_null():
-    return b"\x05"
-
-def _amf_object(d):
-    out = b"\x03"
-    for key, val in d.items():
-        kb = key.encode("utf-8")
-        out += struct.pack(">H", len(kb)) + kb + _amf_value(val)
-    return out + b"\x00\x00\x09"
-
-def _amf_value(v):
-    if v is None:
-        return _amf_null()
-    if isinstance(v, bool):
-        return _amf_bool(v)
-    if isinstance(v, (int, float)):
-        return _amf_number(v)
-    if isinstance(v, str):
-        return _amf_string(v)
-    if isinstance(v, dict):
-        return _amf_object(v)
-    raise TypeError(f"AMF: неподдерживаемый тип {type(v)}")
-
-def _amf_decode(buf, pos):
-
-    if pos >= len(buf):
-        raise ValueError("AMF: нет данных")
-    t = buf[pos]
-    if t == 0x00:
-        return struct.unpack(">d", buf[pos + 1:pos + 9])[0], pos + 9
-    if t == 0x01:
-        return buf[pos + 1] == 1, pos + 2
-    if t == 0x02:
-        n = struct.unpack(">H", buf[pos + 1:pos + 3])[0]
-        return (buf[pos + 3:pos + 3 + n].decode("utf-8", "replace"),
-                pos + 3 + n)
-    if t in (0x03, 0x08):
-        pos += 1 if t == 0x03 else 5
-        obj = {}
-        while True:
-            if buf[pos:pos + 3] == b"\x00\x00\x09":
-                return obj, pos + 3
-            n = struct.unpack(">H", buf[pos:pos + 2])[0]
-            key = buf[pos + 2:pos + 2 + n].decode("utf-8", "replace")
-            val, pos = _amf_decode(buf, pos + 2 + n)
-            obj[key] = val
-    if t in (0x05, 0x06):
-        return None, pos + 1
-    if t == 0x0B:
-        return struct.unpack(">d", buf[pos + 1:pos + 9])[0], pos + 10
-    raise ValueError(f"AMF: тип {t:#x} не поддерживается")
-
-def _amf_decode_all(buf):
-    vals, pos = [], 0
-    while pos < len(buf):
-        try:
-            v, pos = _amf_decode(buf, pos)
-        except Exception:
-            break
-        vals.append(v)
-    return vals
-
-def _be24(buf, pos):
-    return (buf[pos] << 16) | (buf[pos + 1] << 8) | buf[pos + 2]
-
-class _ChunkReader:
-
-    def __init__(self, sock, should_stop=None):
-        self._sock = sock
-        self._buf = b""
-        self._streams = {}
-        self.in_chunk_size = 128
-        self._should_stop = should_stop or (lambda: False)
-
-    def _fill(self):
-
-        if self._should_stop():
-            return False
-        try:
-            chunk = self._sock.recv(65536)
-        except socket.timeout:
-            return True
-        except OSError:
-            return False
-        if not chunk:
-            return False
-        self._buf += chunk
-        return True
-
-    def _need(self, n):
-        while len(self._buf) < n:
-            if not self._fill():
-                return False
-        return True
-
-    def _take(self, n):
-        data, self._buf = self._buf[:n], self._buf[n:]
-        return data
-
-    def next_message(self):
-        while not self._should_stop():
-            if not self._need(1):
-                return None
-            b0 = self._buf[0]
-            fmt = (b0 >> 6) & 0x03
-            csid = b0 & 0x3F
-            if csid == 0:
-                if not self._need(2):
-                    return None
-                csid = self._buf[1] + 64
-                self._take(2)
-            elif csid == 1:
-                if not self._need(3):
-                    return None
-                csid = struct.unpack("<H", self._buf[1:3])[0] + 64
-                self._take(3)
-            else:
-                self._take(1)
-
-            st = self._streams.get(csid)
-            if fmt == 0:
-                if not self._need(11):
-                    return None
-                hdr = self._take(11)
-                ts = _be24(hdr, 0)
-                length = _be24(hdr, 3)
-                mtype = hdr[6]
-                msid = struct.unpack("<I", hdr[7:11])[0]
-                if ts == 0xFFFFFF:
-                    if not self._need(4):
-                        return None
-                    self._take(4)
-                st = {"len": length, "mtype": mtype, "msid": msid,
-                      "buf": b""}
-                self._streams[csid] = st
-            elif fmt == 1:
-                if not self._need(7):
-                    return None
-                hdr = self._take(7)
-                delta = _be24(hdr, 0)
-                length = _be24(hdr, 3)
-                mtype = hdr[6]
-                if delta == 0xFFFFFF:
-                    if not self._need(4):
-                        return None
-                    self._take(4)
-                if st is None:
-                    st = {"len": length, "mtype": mtype, "msid": 0,
-                          "buf": b""}
-                    self._streams[csid] = st
-                else:
-                    st["len"] = length
-                    st["mtype"] = mtype
-                    st["buf"] = b""
-            elif fmt == 2:
-                if not self._need(3):
-                    return None
-                hdr = self._take(3)
-                delta = _be24(hdr, 0)
-                if delta == 0xFFFFFF:
-                    if not self._need(4):
-                        return None
-                    self._take(4)
-                if st is None:
-                    st = {"len": 0, "mtype": 0, "msid": 0, "buf": b""}
-                    self._streams[csid] = st
-                else:
-                    st["buf"] = b""
-            else:
-                if st is None:
-                    st = {"len": 0, "mtype": 0, "msid": 0, "buf": b""}
-                    self._streams[csid] = st
-
-            if st["len"] == 0:
-                continue
-
-            take = min(self.in_chunk_size, st["len"] - len(st["buf"]))
-            if take > 0:
-                if not self._need(take):
-                    return None
-                st["buf"] += self._take(take)
-
-            if len(st["buf"]) >= st["len"]:
-                payload = st["buf"]
-                st["buf"] = b""
-                return st["mtype"], st["msid"], payload
-        return None
-
-class RtmpSinkServer:
-
-    def __init__(self, host="127.0.0.1"):
-        self._host = host
-        self._server_sock = None
-        self._port = None
-        self._stop = threading.Event()
-        self._accept_thread = None
-        self._client_threads = []
-        self._lock = threading.Lock()
-        self._publishing = 0
-
-    def start(self):
-
-        if self._server_sock is not None:
-            return self.url
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            sock.bind((self._host, 0))
-            sock.listen(4)
-        except OSError as e:
-            sock.close()
-            raise OmrBridgeError(f"RTMP sink: не удалось занять порт: {e}")
-        self._server_sock = sock
-        self._port = sock.getsockname()[1]
-        self._stop.clear()
-        self._accept_thread = threading.Thread(
-            target=self._accept_loop, daemon=True, name="rtmp-sink-accept")
-        self._accept_thread.start()
-        config.log.info(f"RTMP sink слушает {self.url}")
-        return self.url
-
-    def stop(self):
-        self._stop.set()
-        sock = self._server_sock
-        self._server_sock = None
-        if sock is not None:
-            try:
-                sock.close()
-            except Exception:
-                pass
-        for t in list(self._client_threads):
-            if t.is_alive():
-                t.join(timeout=2.0)
-        self._client_threads.clear()
-        self._port = None
-        with self._lock:
-            self._publishing = 0
-
-    @property
-    def url(self):
-        return f"rtmp://{self._host}:{self._port}/sink" if self._port else None
-
-    @property
-    def port(self):
-        return self._port
-
-    def is_publishing(self):
-        with self._lock:
-            return self._publishing > 0
-
-    def _accept_loop(self):
-        while not self._stop.is_set():
-            try:
-                client, _addr = self._server_sock.accept()
-            except OSError:
-                break
-            if self._stop.is_set():
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                break
-            t = threading.Thread(
-                target=self._handle_client, args=(client,),
-                daemon=True, name="rtmp-sink-client")
-            self._client_threads.append(t)
-            t.start()
-            self._client_threads = [
-                x for x in self._client_threads if x.is_alive()]
-
-    def _handle_client(self, sock):
-        published = False
-        try:
-            sock.settimeout(1.0)
-            published = self._rtmp_session(sock)
-        except Exception as e:
-            config.log.debug(f"RTMP sink: сессия завершена: {e}")
-        finally:
-            if published:
-                with self._lock:
-                    self._publishing = max(0, self._publishing - 1)
-            try:
-                sock.close()
-            except Exception:
-                pass
-
-    def _rtmp_session(self, sock):
-
-        stop = self._stop.is_set
-
-        def _read_exact(n):
-            data = b""
-            while len(data) < n:
-                if stop():
-                    return None
-                try:
-                    chunk = sock.recv(n - len(data))
-                except socket.timeout:
-                    continue
-                except OSError:
-                    return None
-                if not chunk:
-                    return None
-                data += chunk
-            return data
-
-        c0c1 = _read_exact(1537)
-        if c0c1 is None or c0c1[0] not in (0x03, 0x06):
-            raise OmrBridgeError("RTMP sink: неожиданное рукопожатие")
-        s1 = (struct.pack(">I", int(time.time()) & 0xFFFFFFFF)
-              + b"\x00" * 4
-              + bytes(random.getrandbits(8) for _ in range(1528)))
-        sock.sendall(b"\x03" + s1 + c0c1[1:])
-        if _read_exact(1536) is None:
-            raise OmrBridgeError("RTMP sink: клиент не прислал C2")
-
-        out_chunk_size = 4096
-        self._send_message(sock, 2, 0x01, 0,
-                           struct.pack(">I", out_chunk_size), out_chunk_size)
-
-        reader = _ChunkReader(sock, should_stop=stop)
-        published = False
-
-        while not stop():
-            msg = reader.next_message()
-            if msg is None:
-                break
-            mtype, msid, payload = msg
-
-            if mtype == 0x01 and len(payload) >= 4:
-                new_size = struct.unpack(">I", payload[:4])[0] & 0x7FFFFFFF
-                if new_size >= 1:
-                    reader.in_chunk_size = new_size
-                continue
-
-            if mtype == 0x04 and len(payload) >= 6:
-                event = struct.unpack(">H", payload[:2])[0]
-                if event == 0x0006:
-                    self._send_message(
-                        sock, 2, 0x04, 0,
-                        struct.pack(">H", 0x0007) + payload[2:6],
-                        out_chunk_size)
-                continue
-
-            if mtype == 0x14:
-                vals = _amf_decode_all(payload)
-                if not vals or not isinstance(vals[0], str):
-                    continue
-                cmd = vals[0]
-                txn = vals[1] if len(vals) > 1 and isinstance(
-                    vals[1], (int, float)) else 0.0
-
-                if cmd == "connect":
-                    body = (_amf_string("_result") + _amf_number(txn)
-                            + _amf_null()
-                            + _amf_object({"fmsVer": "FMS/3,5,7,7009",
-                                           "capabilities": 31.0}))
-                    self._send_message(sock, 3, 0x14, 0, body,
-                                       out_chunk_size)
-
-                elif cmd == "createStream":
-                    body = (_amf_string("_result") + _amf_number(txn)
-                            + _amf_null() + _amf_number(1.0))
-                    self._send_message(sock, 3, 0x14, 0, body,
-                                       out_chunk_size)
-
-                elif cmd == "publish":
-                    info = {"level": "status",
-                            "code": "NetStream.Publish.Start",
-                            "description": "Connection succeeded."}
-                    body = (_amf_string("onStatus") + _amf_number(0.0)
-                            + _amf_null() + _amf_object(info))
-                    self._send_message(sock, 3, 0x14, 1, body,
-                                       out_chunk_size)
-                    if not published:
-                        published = True
-                        with self._lock:
-                            self._publishing += 1
-                        config.log.info(
-                            "RTMP sink: основной выход OBS подключился "
-                            "(publish принят)")
-
-                elif cmd in ("releaseStream", "FCPublish", "FCUnpublish",
-                             "deleteStream", "call", "checkBandwidth"):
-                    body = (_amf_string("_result") + _amf_number(txn)
-                            + _amf_null() + _amf_null())
-                    self._send_message(sock, 3, 0x14, 0, body,
-                                       out_chunk_size)
-
-        return published
-
-    def _send_message(self, sock, csid, mtype, msid, payload,
-                      chunk_size=128):
-
-        if csid >= 64:
-            csid = 3
-        hdr = bytes([csid & 0x3F])
-        hdr += struct.pack(">I", 0)[1:]
-        hdr += struct.pack(">I", len(payload))[1:]
-        hdr += bytes([mtype])
-        hdr += struct.pack("<I", msid)
-        out = [hdr]
-        for i in range(0, len(payload), chunk_size):
-            if i:
-                out.append(bytes([0xC0 | (csid & 0x3F)]))
-            out.append(payload[i:i + chunk_size])
-        try:
-            sock.sendall(b"".join(out))
-        except OSError as e:
-            raise OmrBridgeError(f"RTMP sink: отправка не удалась: {e}")
-
 def _atomic_write(path, data_bytes):
     tmp = path + ".msv3tmp"
     with open(tmp, "wb") as f:
@@ -889,8 +465,72 @@ def _upsert_by_id(items, item):
             return
     items.append(item)
 
+_SIMPLE_ENCODER_MAP = {
+    "x264": ("obs_x264", {"preset": "veryfast", "profile": "high",
+                          "rate_control": "CBR"}),
+    "nvenc": ("obs_nvenc_h264", {"preset": "p5", "profile": "high",
+                                 "rate_control": "CBR"}),
+    "qsv": ("obs_qsv11", {"target_usage": "balanced", "profile": "high",
+                          "rate_control": "CBR"}),
+    "amd": ("obs_amf_h264", {"preset": "balanced", "profile": "high",
+                             "rate_control": "CBR"}),
+}
+
+def read_stream_encoder_config(profile_dir):
+
+    basic_ini = os.path.join(profile_dir, "basic.ini")
+    mode = (ini_get(basic_ini, "Output", "Mode") or "Simple").lower()
+
+    if mode == "advanced":
+        enc_id = (ini_get(basic_ini, "AdvOut", "Encoder") or "").strip()
+        if not enc_id:
+            config.log.warning(
+                "basic.ini: [AdvOut] Encoder пуст — цель YouTube получит "
+                "запасной obs_x264 (veryfast). Проверьте настройки вывода "
+                "OBS (Settings → Output → Streaming → Encoder)")
+            return None
+        param = {}
+        se_path = os.path.join(profile_dir, "streamEncoder.json")
+        if os.path.isfile(se_path):
+            try:
+                with open(se_path, "r", encoding="utf-8-sig") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    param = loaded
+                else:
+                    config.log.warning(
+                        "streamEncoder.json не является объектом — "
+                        "использую только битрейт")
+            except Exception as e:
+                config.log.warning(
+                    f"streamEncoder.json не читается: {e} — цель YouTube "
+                    "получит параметры по умолчанию кодера")
+        else:
+            config.log.warning(
+                "streamEncoder.json не найден — цель YouTube получит "
+                "параметры по умолчанию кодера " + enc_id)
+        return {"encoder": enc_id, "param": dict(param),
+                "mode": "advanced"}
+
+    venc = (ini_get(basic_ini, "SimpleOut", "VEncoder")
+            or "x264").strip().lower()
+    if venc in _SIMPLE_ENCODER_MAP:
+        enc_id, param = _SIMPLE_ENCODER_MAP[venc]
+        if venc != "x264":
+            config.log.info(
+                f"Simple-режим: кодер '{venc}' -> {enc_id} (типовые "
+                "параметры; для полного контроля параметров цели "
+                "переключите вывод OBS на Advanced)")
+        return {"encoder": enc_id, "param": dict(param), "mode": "simple"}
+
+    config.log.warning(
+        f"Simple-режим: неизвестный VEncoder '{venc}' — цель YouTube "
+        "получит запасной obs_x264 (veryfast)")
+    return None
+
 def write_omr_targets(profile_dir, platforms):
 
+    warnings = []
     cfg = read_omr_config(profile_dir)
     targets = [t for t in cfg["targets"] if isinstance(t, dict)]
     video_configs = [v for v in cfg["video_configs"]
@@ -898,7 +538,19 @@ def write_omr_targets(profile_dir, platforms):
     audio_configs = [a for a in cfg["audio_configs"]
                      if isinstance(a, dict) and a.get("id")]
 
-    our_ids = set(TARGET_ID.values())
+    legacy_ids = {TARGET_ID["twitch"], f"msv3-vc-twitch",
+                  audio_config_id("twitch")}
+    if any(t.get("id") in legacy_ids for t in targets):
+        config.log.info(
+            "obs-multi-rtmp.json: удаляю устаревшую цель msv3-twitch "
+            "(Twitch теперь основной выход OBS)")
+    targets = [t for t in targets if t.get("id") not in legacy_ids]
+    video_configs = [v for v in video_configs
+                     if v.get("id") not in legacy_ids]
+    audio_configs = [a for a in audio_configs
+                     if a.get("id") not in legacy_ids]
+
+    our_ids = {TARGET_ID["youtube"]}
 
     for t in targets:
         if t.get("id") not in our_ids:
@@ -910,20 +562,19 @@ def write_omr_targets(profile_dir, platforms):
             t["sync-start"] = False
             t["sync-stop"] = False
 
-    for platform, target_id in TARGET_ID.items():
-        info = platforms.get(platform)
-        if not info:
-            continue
+    user_enc = read_stream_encoder_config(profile_dir)
+
+    info = platforms.get("youtube")
+    if info:
         bitrate = int(info.get("bitrate", 6000))
         audio_bitrate = int(info.get("audio_bitrate",
                                      config.DEFAULT_AUDIO_BITRATE))
-        preset = info.get("preset") or config.DEFAULT_X264_PRESET
         audio_track = int(info.get("audio_track", 1) or 1)
         audio_track = max(1, min(config.AUDIO_TRACKS_MAX, audio_track))
 
         target = {
-            "id": target_id,
-            "name": info.get("name") or platform.capitalize(),
+            "id": TARGET_ID["youtube"],
+            "name": info.get("name") or "YouTube",
             "protocol": "RTMP",
             "sync-start": True,
             "sync-stop": True,
@@ -937,27 +588,50 @@ def write_omr_targets(profile_dir, platforms):
                 "pframe_drop_threshold_ms": 900,
                 "max_shutdown_time_sec": 30,
             },
-            "video-config": f"msv3-vc-{platform}",
-            "audio-config": audio_config_id(platform),
+            "video-config": f"msv3-vc-youtube",
+            "audio-config": audio_config_id("youtube"),
         }
         _upsert_by_id(targets, target)
 
-        video = {
-            "id": f"msv3-vc-{platform}",
-            "encoder": "obs_x264",
-            "param": {
+        if user_enc:
+            param = dict(user_enc["param"])
+            encoder_id = user_enc["encoder"]
+            param["bitrate"] = bitrate
+            param.setdefault("keyint_sec", config.RTMP_KEYINT_SEC)
+            if not param.get("rate_control"):
+                param["rate_control"] = "CBR"
+            config.log.info(
+                f"Цель YouTube: кодер {encoder_id}, параметры — из "
+                f"настроек вывода OBS ({user_enc['mode']}), битрейт "
+                f"перезаписан на {bitrate} kbps")
+        else:
+            encoder_id = "obs_x264"
+            param = {
                 "bitrate": bitrate,
                 "rate_control": "CBR",
                 "keyint_sec": config.RTMP_KEYINT_SEC,
-                "preset": preset,
+                "preset": config.DEFAULT_X264_PRESET,
                 "profile": "high",
-            },
+            }
+            warnings.append(
+                "Кодер стрима OBS не определён в профиле — цель YouTube "
+                "получила запасной obs_x264, он грузит CPU: выберите кодер "
+                "в Settings → Output → Streaming (Encoder)")
+            config.log.warning(warnings[-1])
+            config.log.info(
+                f"Цель YouTube: запасной obs_x264 "
+                f"({config.DEFAULT_X264_PRESET}) @ {bitrate} kbps")
+
+        video = {
+            "id": "msv3-vc-youtube",
+            "encoder": encoder_id,
+            "param": param,
             "fps-denumerator": 1,
         }
         _upsert_by_id(video_configs, video)
 
         audio = {
-            "id": audio_config_id(platform),
+            "id": audio_config_id("youtube"),
             "encoder": "ffmpeg_aac",
             "param": {"bitrate": audio_bitrate},
             "mixerId": audio_track - 1,
@@ -971,13 +645,11 @@ def write_omr_targets(profile_dir, platforms):
     cfg["video_configs"] = video_configs
     cfg["audio_configs"] = audio_configs
     _write_json(omr_config_path(profile_dir), cfg)
-    tracks = ", ".join(
-        f"{p}: дорожка {platforms[p].get('audio_track', 1)}"
-        for p in sorted(TARGET_ID) if platforms.get(p))
+    track = (info or {}).get("audio_track", 1)
     config.log.info(
-        "obs-multi-rtmp.json: цели %s готовы (sync-start/sync-stop; "
-        "звук — %s)"
-        % (", ".join(sorted(TARGET_ID.values())), tracks))
+        "obs-multi-rtmp.json: цель YouTube готова (sync-start/sync-stop; "
+        f"звук — дорожка {track})")
+    return warnings
 
 def strip_profile_auth_gate(profile_dir):
 
@@ -993,38 +665,54 @@ def strip_profile_auth_gate(profile_dir):
         return True
     return False
 
-def patch_profile_for_sink(profile_dir, sink_url):
+def patch_profile_for_twitch(profile_dir, server, key, bitrate,
+                             audio_track=1):
 
+    warnings = []
     _write_json(os.path.join(profile_dir, "service.json"), {
         "type": "rtmp_custom",
-        "settings": {"server": sink_url, "key": "sink"},
+        "settings": {"server": server, "key": key},
     })
 
     basic_ini = os.path.join(profile_dir, "basic.ini")
     mode = (ini_get(basic_ini, "Output", "Mode") or "Simple").lower()
-    encoder = ini_get(basic_ini, "AdvOut", "Encoder")
 
     if mode != "advanced":
-        ini_patch(basic_ini, "SimpleOut", "VBitrate",
-                  str(config.SINK_MAIN_BITRATE))
+        ini_patch(basic_ini, "SimpleOut", "VBitrate", str(bitrate))
+        if audio_track != 1:
+            warnings.append(
+                f"Simple-режим OBS стримит один общий микс звука: дорожка "
+                f"{audio_track} для Twitch не применится — переключите "
+                "вывод OBS в Advanced для раздельных дорожек")
+            config.log.warning(warnings[-1])
         config.log.info(
-            f"Основной выход (Simple): VBitrate → {config.SINK_MAIN_BITRATE} "
-            "kbps на время эфира")
-    elif encoder and encoder != "obs_x264":
-        config.log.info(
-            f"Основной выход (Advanced, {encoder}): кодер не трогаю — "
-            "аппаратный, почти не грузит CPU")
+            f"Основной выход (Simple) → Twitch: VBitrate {bitrate} kbps "
+            "на время эфира")
     else:
-        _write_json(os.path.join(profile_dir, "streamEncoder.json"), {
-            "bitrate": config.SINK_MAIN_BITRATE,
-            "rate_control": "CBR",
-            "keyint_sec": 2,
-            "preset": "ultrafast",
-            "profile": "high",
-        })
-        config.log.info(
-            f"Основной выход (Advanced, x264): ultrafast / "
-            f"{config.SINK_MAIN_BITRATE} kbps на время эфира")
+        se_path = os.path.join(profile_dir, "streamEncoder.json")
+        param = {}
+        if os.path.isfile(se_path):
+            try:
+                with open(se_path, "r", encoding="utf-8-sig") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    param = loaded
+            except Exception as e:
+                config.log.warning(
+                    f"streamEncoder.json не читается: {e} — битрейт "
+                    "основного выхода не перезаписан")
+        if param:
+            param["bitrate"] = bitrate
+            _write_json(se_path, param)
+            encoder = ini_get(basic_ini, "AdvOut", "Encoder") or "?"
+            config.log.info(
+                f"Основной выход (Advanced, {encoder}) → Twitch: параметры "
+                f"кодера пользователя, битрейт перезаписан на {bitrate} kbps")
+        if ini_patch(basic_ini, "AdvOut", "TrackIndex", str(audio_track)):
+            config.log.info(
+                f"Основной выход (Advanced): дорожка звука стрима → "
+                f"{audio_track}")
+    return warnings
 
 def _wait_profile(name, timeout=15.0):
 
@@ -1097,7 +785,6 @@ def profile_switch_patch(patch_fn, log_prefix=""):
 class OmrEngine:
 
     def __init__(self, backup_dir=None):
-        self.sink = RtmpSinkServer()
         self.backup = SessionBackup(
             backup_dir or config.get_backup_dir())
         self.session_profile_dir = None
@@ -1124,23 +811,31 @@ class OmrEngine:
         config.log.info(
             f"obs-multi-rtmp найден (версия {info.get('version') or '?'})")
 
-        sink_url = self.sink.start()
-
         profile_dir = str(
             _fe("obs_frontend_get_current_profile_path")) \
             .replace("\\", "/").rstrip("/")
         self.session_profile_dir = profile_dir
         self.backup.save(profile_dir)
 
+        tw = platforms.get("twitch") or {}
+        collected = {}
+
         def _patch(pdir):
-            write_omr_targets(pdir, platforms)
-            patch_profile_for_sink(pdir, sink_url)
+            warnings = write_omr_targets(pdir, platforms)
+            warnings += patch_profile_for_twitch(
+                pdir,
+                server=tw.get("server") or config.DEFAULT_TWITCH_RTMP_URL,
+                key=tw.get("key") or "",
+                bitrate=int(tw.get("bitrate", config.DEFAULT_TWITCH_BITRATE)),
+                audio_track=int(tw.get("audio_track", 1) or 1),
+            )
             strip_profile_auth_gate(pdir)
+            collected["warnings"] = warnings
 
         profile_switch_patch(_patch, log_prefix="Подготовка эфира: ")
-        return {"sink_url": sink_url, "omr": info}
+        return {"omr": info, "warnings": collected.get("warnings", [])}
 
-    def go_live(self, wait_publish_timeout=30.0, wait_start_timeout=15.0):
+    def go_live(self, wait_bytes_timeout=30.0, wait_start_timeout=15.0):
 
         if _fe("obs_frontend_streaming_active"):
             raise OmrBridgeError(
@@ -1151,9 +846,6 @@ class OmrEngine:
         became_active = False
         deadline = time.time() + wait_start_timeout
         while time.time() < deadline:
-            if self.sink.is_publishing():
-                self._start_pending = False
-                return True
             try:
                 if _fe("obs_frontend_streaming_active"):
                     became_active = True
@@ -1163,34 +855,43 @@ class OmrEngine:
             time.sleep(0.1)
 
         if not became_active:
+            self._start_pending = False
             raise OmrBridgeError(
                 "Основной выход OBS не стал активным за "
                 f"{wait_start_timeout:.0f} с после команды старта — "
                 "смотрите лог OBS (диалог «Трансляция не настроена», "
-                "ошибка кодера или недоступный сервер)")
+                "ошибка кодера или недоступный сервер Twitch)")
 
-        deadline = time.time() + wait_publish_timeout
+        deadline = time.time() + wait_bytes_timeout
+        flowing = False
         while time.time() < deadline:
-            if self.sink.is_publishing():
-                self._start_pending = False
-                return True
             try:
-                active = _fe("obs_frontend_streaming_active")
+                if not _fe("obs_frontend_streaming_active"):
+                    self._start_pending = False
+                    raise OmrBridgeError(
+                        "Основной выход OBS отключился сразу после старта — "
+                        "смотрите лог OBS (соединение с Twitch сброшено "
+                        "или исчерпаны повторные попытки)")
+                sent = main_stream_bytes()
+                if sent is None:
+                    flowing = True
+                    break
+                if sent > 0:
+                    flowing = True
+                    break
+            except OmrBridgeError:
+                raise
             except Exception:
+                flowing = True
                 break
-            if not active:
-                self._start_pending = False
-                raise OmrBridgeError(
-                    "Основной выход OBS отключился, не подключившись к "
-                    "локальному RTMP sink — смотрите лог OBS (обычно: "
-                    "соединение сброшено или исчерпаны повторные попытки)")
-            time.sleep(0.25)
+            time.sleep(0.5)
 
         self._start_pending = False
-        config.log.warning(
-            f"RTMP sink: основной выход не прислал publish за "
-            f"{wait_publish_timeout:.0f} с (продолжаю — цели obs-multi-rtmp "
-            "уже стартовали по sync-start)")
+        if not flowing:
+            config.log.warning(
+                f"Twitch-ингест не подтвердил передачу данных за "
+                f"{wait_bytes_timeout:.0f} с — проверьте лог OBS (цель "
+                "YouTube уже стартовала по sync-start)")
         return True
 
     def go_down(self, wait_inactive_timeout=30.0, wait_start_settle=None):
@@ -1205,8 +906,7 @@ class OmrEngine:
             settled = False
             while time.time() < deadline:
                 try:
-                    if (_fe("obs_frontend_streaming_active")
-                            or self.sink.is_publishing()):
+                    if _fe("obs_frontend_streaming_active"):
                         settled = True
                         break
                 except Exception:
@@ -1221,8 +921,7 @@ class OmrEngine:
         self._start_pending = False
 
         try:
-            if (_fe("obs_frontend_streaming_active")
-                    or self.sink.is_publishing()):
+            if _fe("obs_frontend_streaming_active"):
                 _fe("obs_frontend_streaming_stop", timeout=30)
         except Exception as e:
             errors.append(f"streaming_stop: {e}")
@@ -1270,11 +969,6 @@ class OmrEngine:
             except Exception as e:
                 errors.append(f"restore: {e}")
 
-        try:
-            self.sink.stop()
-        except Exception as e:
-            errors.append(f"sink: {e}")
-
         self.session_profile_dir = None
         return errors
 
@@ -1317,8 +1011,47 @@ class OmrEngine:
 
 _OMR_OUTPUT_NAMES = ("multi-output", "multi-output 2",
                      "multi-output 3", "multi-output 4")
+_MAIN_OUTPUT_NAMES = ("adv_stream", "simple_stream")
 _STATS_UNAVAILABLE_WARNED = False
 _UNMATCHED_WARNED = False
+
+def _run_on_main_task(fn, timeout=30.0):
+
+    if _run_on_main is _default_dispatcher:
+        return fn()
+    result = {}
+
+    def _task():
+        try:
+            result["value"] = fn()
+        except Exception as e:
+            result["error"] = e
+
+    _run_on_main(_task, timeout=timeout, description=fn.__name__)
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+def _main_stream_bytes():
+
+    if obs is None or not hasattr(obs, "obs_get_output_by_name"):
+        return None
+    for name in _MAIN_OUTPUT_NAMES:
+        out = obs.obs_get_output_by_name(name)
+        if out is None:
+            continue
+        try:
+            if obs.obs_output_active(out):
+                return obs.obs_output_get_total_bytes(out)
+        except Exception as e:
+            config.log.debug(f"байты выхода {name}: {e}")
+        finally:
+            obs.obs_output_release(out)
+    return 0
+
+def main_stream_bytes():
+
+    return _run_on_main_task(_main_stream_bytes)
 
 def _output_platform(out):
 
@@ -1353,26 +1086,38 @@ def collect_stream_output_stats():
                 "obspython не экспортирует obs_get_output_by_name (нужен "
                 "OBS 30.2+) — битрейт потоков в док-панели будет недоступен")
         return None
-    per_platform = {}
-    found_active = 0
-    unmatched = []
-    for name in _OMR_OUTPUT_NAMES:
-        out = obs.obs_get_output_by_name(name)
-        if out is None:
-            continue
-        try:
-            if not obs.obs_output_active(out):
+
+    def _collect():
+        per_platform = {}
+        found_active = 0
+        unmatched = []
+        for name in _OMR_OUTPUT_NAMES + _MAIN_OUTPUT_NAMES:
+            out = obs.obs_get_output_by_name(name)
+            if out is None:
                 continue
-            found_active += 1
-            platform = _output_platform(out)
-            if platform and platform not in per_platform:
-                per_platform[platform] = obs.obs_output_get_total_bytes(out)
-            elif not platform:
-                unmatched.append(name)
-        except Exception as e:
-            config.log.debug(f"статистика выхода {name}: {e}")
-        finally:
-            obs.obs_output_release(out)
+            try:
+                if not obs.obs_output_active(out):
+                    continue
+                found_active += 1
+                platform = _output_platform(out)
+                if platform and platform not in per_platform:
+                    per_platform[platform] = \
+                        obs.obs_output_get_total_bytes(out)
+                elif not platform:
+                    unmatched.append(name)
+            except Exception as e:
+                config.log.debug(f"статистика выхода {name}: {e}")
+            finally:
+                obs.obs_output_release(out)
+        return per_platform, found_active, unmatched
+
+    try:
+        per_platform, found_active, unmatched = \
+            _run_on_main_task(_collect)
+    except Exception as e:
+        config.log.debug(f"статистика выходов: {e}")
+        return None
+
     if found_active and not per_platform and not _UNMATCHED_WARNED:
         _UNMATCHED_WARNED = True
         config.log.warning(

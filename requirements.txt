@@ -1,0 +1,13 @@
+# OBS Multi-Stream — Python-зависимости
+#
+# Ставить в тот Python, который использует OBS:
+#   pip install -r requirements.txt
+
+# WebSocket-сервер док-панели (HTTP 7664 / WS 7665)
+websockets>=11.0
+
+# Чат Twitch (IRC over WebSocket, только чтение)
+websocket-client>=1.6.0
+
+# Необязательно: автосжатие превью YouTube больше 2 МБ (JPEG, до 1920px)
+# Pillow>=10.0

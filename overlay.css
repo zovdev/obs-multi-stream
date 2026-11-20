@@ -1,0 +1,119 @@
+/* «Чат для показа» — страница для Browser Source OBS.
+ *
+ * Фон полностью прозрачен по альфе: видны только сообщения.
+ * Настройки (формат, время жизни, лимит) приходят от плагина по WS
+ * (overlay_config), формат рендерит общий chat_format.js.
+ */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  color: #fff;
+  font-family: "Inter", "Segoe UI", "Roboto", sans-serif;
+  font-size: 16px;
+}
+
+#overlay-chat {
+  height: 100%;
+  overflow-y: auto;
+  scrollbar-width: none;           /* прокрутка есть, но ползунок не виден */
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;       /* сообщения прижаты к низу сцены */
+  padding: 8px 12px;
+}
+
+#overlay-chat::-webkit-scrollbar { width: 0; height: 0; }
+
+.chat-message {
+  padding: 4px 10px;
+  margin-top: 4px;
+  border-radius: 6px;
+  font-size: 16px;
+  line-height: 1.5;
+  word-wrap: break-word;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, 0.45);
+  border-left: 3px solid transparent;
+  animation: msg-in 0.18s ease-out;
+  flex: none;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.chat-message.twitch { border-left-color: #9146FF; }
+.chat-message.youtube { border-left-color: #FF0000; }
+
+.chat-message.owner { border-left-color: #ffd700; }
+.chat-message.moderator { border-left-color: #00b5ad; }
+
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.chat-message.fade-out {
+  animation: msg-out 0.45s ease-in forwards;
+}
+
+@keyframes msg-out {
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+.chat-message .time {
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-right: 7px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+  user-select: none;
+}
+
+.chat-message .prefix {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 7px;
+  vertical-align: middle;
+  color: #fff;
+}
+
+.chat-message.twitch .prefix { background: #9146FF; }
+.chat-message.youtube .prefix { background: #c4302b; }
+
+.chat-message .author {
+  font-weight: 700;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.chat-message .text { color: #fff; }
+
+.chat-message .chat-lit {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.chat-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: middle;
+  margin-right: 6px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.chat-avatar.letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  user-select: none;
+}

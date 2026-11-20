@@ -211,6 +211,31 @@ function handleMessage(msg) {
       log(`YouTube API quota: осталось ~${msg.remaining} единиц`, "warning");
       break;
 
+    case "quota_exhausted": {
+      const hrs = Math.ceil((msg.reset_in || 0) / 3600);
+      log(`YouTube API: дневная квота исчерпана (403) — чат приостановлен до сброса (через ~${hrs} ч). Зрители/статусы обновляться продолжат`, "warning");
+      break;
+    }
+
+    case "chat_source": {
+      if (msg.source === "innertube") {
+        log("YouTube чат: анонимный источник — квота Data API не тратится" +
+            (msg.reason ? ` (${msg.reason})` : ""), "success");
+      } else {
+        log("YouTube чат: официальный API — квота тратится" +
+            (msg.reason ? ` (${msg.reason})` : ""), "warning");
+      }
+      break;
+    }
+
+    case "token_status":
+      handleTokenStatus(msg);
+      break;
+
+    case "overlay_config":
+      handleOverlayConfig(msg);
+      break;
+
     case "log":
       log(msg.message, msg.level);
       break;
@@ -545,6 +570,7 @@ function applySettings(s) {
   renderGameMode();
   renderThumbnail();
   updateTwitchBitrateWarn();
+  applyExtSettings(s);
   settingsBusy = false;
 }
 
@@ -556,11 +582,17 @@ function collectSettings() {
     game: fGame.value,
     yt_category: ytCategory,
     thumbnail: thumbnailPath,
-    twitch_bitrate: parseInt(fTwBitrate.value) || 6000,
-    youtube_bitrate: parseInt(fYtBitrate.value) || 9000,
+    twitch_bitrate: clampBitrate(parseInt(fTwBitrate.value) || 6000, 1000, 12000),
+    youtube_bitrate: clampBitrate(parseInt(fYtBitrate.value) || 9000, 1000, 50000),
     twitch_audio_track: twTrackSeg.get(),
     youtube_audio_track: ytTrackSeg.get(),
   };
+}
+
+function clampBitrate(v, min, max) {
+  v = parseInt(v, 10);
+  if (isNaN(v)) return min;
+  return Math.max(min, Math.min(max, v));
 }
 
 function updateTwitchBitrateWarn() {
@@ -592,6 +624,18 @@ function setSaveState(state) {
 [fTitle, fDescription, fGame, fTwBitrate, fYtBitrate].forEach((el) => {
   el.addEventListener("input", scheduleSave);
   el.addEventListener("change", scheduleSave);
+});
+
+// Жёсткие лимиты битрейта (как у степперов): ручной ввод тоже клампится
+[fTwBitrate, fYtBitrate].forEach((el) => {
+  const min = 1000;
+  const max = el === fTwBitrate ? 12000 : 50000;
+  const clamp = () => {
+    const v = parseInt(el.value, 10);
+    if (!isNaN(v)) el.value = Math.max(min, Math.min(max, v));
+  };
+  el.addEventListener("blur", clamp);
+  el.addEventListener("change", clamp);
 });
 
 document.querySelectorAll(".stepper").forEach((st) => {
@@ -1327,10 +1371,27 @@ function appendChatMessage(msg) {
 
   if (chatPlaceholder) chatPlaceholder.hidden = true;
 
+  // Кастомный формат: теги <time> <source> <avatar> <username> <message>
+  const div = (window.ChatFormat && extSettings.format)
+    ? ChatFormat.renderRow(msg, extSettings.format)
+    : fallbackChatRow(msg);
+
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+
+  while (chat.children.length > 200) {
+    const first = chat.firstElementChild;
+    if (!first || first === chatPlaceholder) break;
+    chat.removeChild(first);
+  }
+}
+
+/** Резервный рендер, если chat_format.js не загрузился. */
+function fallbackChatRow(msg) {
   const div = document.createElement("div");
   div.className = "chat-message " + msg.platform;
 
-      const timeEl = document.createElement("span");
+  const timeEl = document.createElement("span");
   timeEl.className = "time";
   const ts = (msg.timestamp ? msg.timestamp * 1000 : Date.now());
   const d = new Date(ts);
@@ -1355,14 +1416,7 @@ function appendChatMessage(msg) {
   div.appendChild(prefix);
   div.appendChild(author);
   div.appendChild(text);
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-
-  while (chat.children.length > 200) {
-    const first = chat.firstElementChild;
-    if (!first || first === chatPlaceholder) break;
-    chat.removeChild(first);
-  }
+  return div;
 }
 
 function clearChat() {
@@ -1381,6 +1435,251 @@ function log(message, level) {
   else if (level === "error") logLine.classList.add("error");
   else if (level === "success") logLine.classList.add("success");
 }
+
+/* ============ Настройки расширения (вкладка ⚙) ============ */
+
+const extPanel = $("panel-ext");
+const btnExtSettings = $("btn-ext-settings");
+const btnExtClose = $("btn-ext-close");
+const extChatSource = $("ext-chat-source");
+const extYtInterval = $("ext-yt-interval");
+const extTwInterval = $("ext-tw-interval");
+const extChatFormat = $("ext-chat-format");
+const extOverlayEnabled = $("ext-overlay-enabled");
+const extOverlayUrl = $("ext-overlay-url");
+const btnOverlayCopy = $("btn-overlay-copy");
+const extOverlayTtl = $("ext-overlay-ttl");
+const extOverlayMax = $("ext-overlay-max");
+const formatPreview = $("format-preview");
+const tokenStatusEls = {
+  twitch: $("tw-token-status"),
+  youtube: $("yt-token-status"),
+};
+
+// Текущие значения (format применяется к чату немедленно)
+let extSettings = {
+  chat_source: "auto",
+  yt_viewers_interval: 15,
+  tw_viewers_interval: 30,
+  format: (window.ChatFormat && ChatFormat.DEFAULT_FORMAT) ||
+          "<time> <source> <avatar> <username>: <message>",
+  overlay_enabled: false,
+  overlay_ttl: 30,
+  overlay_max_messages: 15,
+};
+
+let extSaveTimeout = null;
+
+function applyExtSettings(s) {
+  if (!s) return;
+  if (s.ext_chat_source && document.activeElement !== extChatSource) {
+    extChatSource.value = s.ext_chat_source;
+    extSettings.chat_source = s.ext_chat_source;
+  }
+  const setNum = (el, v, fallback) => {
+    if (v === undefined || document.activeElement === el) return fallback;
+    const n = parseInt(v, 10);
+    el.value = isNaN(n) ? fallback : n;
+    return isNaN(n) ? fallback : n;
+  };
+  extSettings.yt_viewers_interval = setNum(
+    extYtInterval, s.ext_yt_viewers_interval, extSettings.yt_viewers_interval);
+  extSettings.tw_viewers_interval = setNum(
+    extTwInterval, s.ext_tw_viewers_interval, extSettings.tw_viewers_interval);
+  if (typeof s.ext_chat_format === "string" && s.ext_chat_format.trim()
+      && document.activeElement !== extChatFormat) {
+    extChatFormat.value = s.ext_chat_format;
+    extSettings.format = s.ext_chat_format;
+  }
+  if (s.ext_overlay_enabled !== undefined) {
+    extOverlayEnabled.checked = !!s.ext_overlay_enabled;
+    extSettings.overlay_enabled = !!s.ext_overlay_enabled;
+  }
+  extSettings.overlay_ttl = setNum(
+    extOverlayTtl, s.ext_overlay_ttl, extSettings.overlay_ttl);
+  extSettings.overlay_max_messages = setNum(
+    extOverlayMax, s.ext_overlay_max_messages,
+    extSettings.overlay_max_messages);
+  if (s.overlay_url && document.activeElement !== extOverlayUrl
+      && extOverlayUrl.value !== s.overlay_url) {
+    extOverlayUrl.value = s.overlay_url;
+  }
+  updateFormatPreview();
+}
+
+function collectExtSettings() {
+  const num = (el, fallback) => {
+    const n = parseInt(el.value, 10);
+    return isNaN(n) ? fallback : n;
+  };
+  return {
+    ext_chat_source: extChatSource.value || "auto",
+    ext_yt_viewers_interval: num(extYtInterval, 15),
+    ext_tw_viewers_interval: num(extTwInterval, 30),
+    ext_chat_format: extChatFormat.value.trim() ||
+                     "<time> <source> <avatar> <username>: <message>",
+    ext_overlay_enabled: extOverlayEnabled.checked,
+    ext_overlay_ttl: num(extOverlayTtl, 30),
+    ext_overlay_max_messages: num(extOverlayMax, 15),
+  };
+}
+
+function scheduleExtSave() {
+  // Локально применяем формат сразу (чат и превью реагируют мгновенно)
+  extSettings.format = extChatFormat.value.trim() ||
+                       "<time> <source> <avatar> <username>: <message>";
+  updateFormatPreview();
+  if (extSaveTimeout) clearTimeout(extSaveTimeout);
+  extSaveTimeout = setTimeout(() => {
+    send({ type: "update_settings", settings: collectExtSettings() });
+  }, 600);
+}
+
+/* --- вкладка: открыть/закрыть --- */
+
+function toggleExtPanel(open) {
+  const isOpen = !extPanel.hidden;
+  const target = (open === undefined) ? !isOpen : !!open;
+  extPanel.hidden = !target;
+  btnExtSettings.classList.toggle("active", target);
+  if (target) {
+    // Актуальный URL оверлея и настройки — запрашиваем у бэка
+    send({ type: "get_settings" });
+  }
+}
+
+if (btnExtSettings) btnExtSettings.addEventListener("click", () => toggleExtPanel());
+if (btnExtClose) btnExtClose.addEventListener("click", () => toggleExtPanel(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !extPanel.hidden) toggleExtPanel(false);
+});
+
+/* --- подсказки «?» --- */
+
+document.querySelectorAll(".help-btn").forEach((btn) => {
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const el = $(btn.dataset.help);
+    if (el) el.hidden = !el.hidden;
+  });
+});
+
+document.addEventListener("click", (e) => {
+  // Клик мимо подсказки — закрываем открытые
+  document.querySelectorAll(".help-popover").forEach((el) => {
+    if (!el.hidden && !el.contains(e.target)) el.hidden = true;
+  });
+});
+
+function buildChatFormatHelp() {
+  const el = $("help-chat-format");
+  if (!el || !window.ChatFormat) return;
+  const parts = [];
+  ChatFormat.TAGS.forEach((t) => {
+    const div = document.createElement("div");
+    div.className = "tag-doc";
+    const code = document.createElement("code");
+    code.textContent = t.tag;
+    div.appendChild(code);
+    div.appendChild(document.createTextNode(" — " + t.desc));
+    parts.push(div);
+  });
+  parts.forEach((p) => el.appendChild(p));
+  const note = document.createElement("div");
+  note.style.marginTop = "6px";
+  note.textContent = "Всё, что не тег, выводится как есть. Неизвестные " +
+    "теги останутся текстом — превью ниже показывает итоговый вид.";
+  el.appendChild(note);
+}
+
+/* --- живое превью формата --- */
+
+function updateFormatPreview() {
+  if (!formatPreview || !window.ChatFormat) return;
+  formatPreview.innerHTML = "";
+  const samples = [
+    { platform: "twitch", author: "develper", text: "привет!",
+      color: "#9146FF", timestamp: Date.now() / 1000 },
+    { platform: "youtube", author: "Anna", text: "первый раз тут",
+      timestamp: Date.now() / 1000, is_owner: true },
+  ];
+  samples.forEach((m) => {
+    formatPreview.appendChild(ChatFormat.renderRow(m, extSettings.format));
+  });
+}
+
+/* --- токены: статус и кнопки --- */
+
+function handleTokenStatus(msg) {
+  const el = tokenStatusEls[msg.platform];
+  if (!el) return;
+  const busy = (msg.ok === null || msg.ok === undefined);
+  el.textContent = msg.message || (busy ? "выполняется…" : "—");
+  el.className = "token-status " +
+    (busy ? "busy" : (msg.ok ? "ok" : "fail"));
+  if (msg.ok === false) {
+    log(msg.message || "Ошибка токена", "error");
+  }
+}
+
+function tokenAction(platform, action) {
+  const el = tokenStatusEls[platform];
+  if (el) {
+    el.textContent = action === "test" ? "проверяю…" : "обновляю…";
+    el.className = "token-status busy";
+  }
+  send({ type: action === "test" ? "test_token" : "refresh_token",
+         platform });
+}
+
+$("btn-tw-test").addEventListener("click", () => tokenAction("twitch", "test"));
+$("btn-tw-refresh").addEventListener("click", () => tokenAction("twitch", "refresh"));
+$("btn-yt-test").addEventListener("click", () => tokenAction("youtube", "test"));
+$("btn-yt-refresh").addEventListener("click", () => tokenAction("youtube", "refresh"));
+
+/* --- оверлей: конфиг от бэка + копирование ссылки --- */
+
+function handleOverlayConfig(msg) {
+  const cfg = msg.overlay || {};
+  applyExtSettings({
+    ext_chat_format: cfg.format,
+    ext_overlay_enabled: cfg.enabled,
+    ext_overlay_ttl: cfg.ttl_sec,
+    ext_overlay_max_messages: cfg.max_messages,
+    overlay_url: cfg.url,
+  });
+}
+
+if (btnOverlayCopy) {
+  btnOverlayCopy.addEventListener("click", async () => {
+    const url = extOverlayUrl.value;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      btnOverlayCopy.textContent = "✓";
+      log("Ссылка на чат скопирована — вставьте её как URL Browser Source", "success");
+      setTimeout(() => { btnOverlayCopy.textContent = "⧉"; }, 1500);
+    } catch (e) {
+      // OBS CEF может не отдать clipboard API: выделяем поле для ручного копирования
+      extOverlayUrl.focus();
+      extOverlayUrl.select();
+      log("Скопируйте ссылку вручную (Ctrl+C) — поле выделено", "warning");
+    }
+  });
+}
+
+/* --- слушатели полей --- */
+
+[extChatSource, extYtInterval, extTwInterval, extOverlayTtl,
+ extOverlayMax].forEach((el) => {
+  el.addEventListener("input", scheduleExtSave);
+  el.addEventListener("change", scheduleExtSave);
+});
+extChatFormat.addEventListener("input", scheduleExtSave);
+extOverlayEnabled.addEventListener("change", scheduleExtSave);
+
+buildChatFormatHelp();
+updateFormatPreview();
 
 renderStages();
 connect();

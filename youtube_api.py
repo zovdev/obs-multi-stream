@@ -247,7 +247,7 @@ def get_stream(access_token, stream_id):
         return None
     return {
         "id": items[0].get("id"),
-        "rtmp_url": info.get("ingestionAddress"),
+        "rtmp_url": info.get("rtmpsIngestionAddress") or info.get("ingestionAddress"),
         "stream_key": info.get("streamName"),
     }
 
@@ -268,12 +268,12 @@ def create_stream(access_token, title, reusable=True):
     )
     stream_id = result.get("id")
     ingestion_info = result.get("cdn", {}).get("ingestionInfo", {})
-    ingestion = ingestion_info.get("ingestionAddress")
+    ingestion = ingestion_info.get("rtmpsIngestionAddress") or ingestion_info.get("ingestionAddress")
     stream_name = ingestion_info.get("streamName")
     if not (stream_id and ingestion and stream_name):
         raise YouTubeAPIError(f"Не получен stream_id/ingestion: {result}")
-    config.log.info(f"YouTube stream создан: {stream_id} "
-                    f"(reusable={reusable})")
+    config.log.info(f"YouTube stream создан: {stream_id} (reusable={reusable})")
+
     return {
         "id": stream_id,
         "rtmp_url": ingestion,
